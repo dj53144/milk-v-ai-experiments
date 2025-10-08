@@ -68,7 +68,7 @@ coverage.xml
 .pytest_cache/
 
 # Jupyter Notebook temporary files
-*.ipynb
+#  *.ipynb
 
 # Ipython history
 .ipython
