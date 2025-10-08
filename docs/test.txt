@@ -1,0 +1,1349 @@
+RISC-V OPTIMIZATION GUIDELINES
+Last Updated: October 06, 2025
+Table of Contents
+
+Memory Management
+Performance Tips
+Package Limitations
+Package Reference
+
+NUMPY (v2.2.6)
+PANDAS (v2.3.2)
+MATPLOTLIB (v3.10.5)
+SCIKIT-LEARN (v1.7.1)
+PYTORCH ECOSYSTEM
+HUGGING FACE TRANSFORMERS (v4.56.1)
+LANGCHAIN ECOSYSTEM
+OPENAI & ANTHROPIC INTEGRATION
+JUPYTER AI MAGICS (v2.31.6)
+COMPUTER VISION PACKAGES
+NATURAL LANGUAGE PROCESSING
+DATA PROCESSING & UTILITIES
+FAISS (v1.12.0 - Custom RISC-V build)
+LIGHTGBM (v4.6.0)
+JUPYTER SPECIFIC EXTENSIONS
+
+
+Workflow Patterns
+Environment Constraints
+Common Integration Patterns
+
+Memory Management
+Use data chunking for large datasets (see Dask section for examples)
+Prefer dask for out-of-core computations
+Monitor memory with !free -h in notebook cells
+Use smaller batch sizes in PyTorch DataLoader (cross-reference: PyTorch template)
+Performance Tips
+Use CPU-optimized NumPy operations
+Batch process with PyTorch DataLoader
+For Transformers, use smaller models (DistilBERT, TinyBERT; see Transformers section)
+Enable OpenMP where available (e.g., in SciPy linear algebra)
+Use FAISS with smaller indices (see FAISS section for memory tips)
+Package Limitations
+No CUDA acceleration (CPU-only for PyTorch and similar)
+Some PyTorch operations may be slower; add try-except for unsupported ops
+Large model fine-tuning not recommended—prefer pre-trained with limited epochs
+FAISS may have reduced performance on large datasets; implement index pruning if OOM errors occur
+Advanced: For fault-tolerant workflows, wrap operations in try-except blocks and log errors with Python's logging module
+Shared Boilerplate
+Common imports across templates (use as needed):
+pythonimport numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import torch
+import logging
+Memory check cell:
+python!free -h
+import gc
+gc.collect()  # Force garbage collection after heavy ops
+Package Reference
+NUMPY (v2.2.6)
+Updated: October 06, 2025
+Category: Core Data Science
+Description: Numerical computing library for Python
+Key Features:
+
+N-dimensional array object
+Mathematical functions
+Linear algebra, Fourier transforms, random number capabilities
+
+RISC-V Considerations:
+
+Optimized for CPU-only operations
+Memory-efficient array operations
+Error handling: Use np.errstate to suppress warnings in noisy environments
+
+Examples:
+python# Create arrays
+arr = np.array([1, 2, 3, 4, 5])
+matrix = np.array([[1, 2], [3, 4]])
+
+# Array operations
+result = arr * 2
+dot_product = np.dot(matrix, matrix)
+
+# Mathematical functions
+sine = np.sin(arr)
+log = np.log(arr)
+Notebook Template: Basic Numerical Analysis
+Use Case: Exploratory numerical computations on sensor data
+Prompt Example: "Generate a notebook using NumPy template for analyzing a dataset of sensor readings from 'sensors.csv', including stats and visualizations"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport numpy as np
+import matplotlib.pyplot as plt  # See Matplotlib section for advanced plotting
+Cell 2: Data Loading
+python# Load real-world data (assume CSV with columns: time, temp, humidity)
+data = np.genfromtxt('sensors.csv', delimiter=',', skip_header=1)
+temp_readings = data[:, 1]  # Extract temperature column
+arr_2d = data[:, 1:3]  # 2D slice for temp/humidity
+Cell 3: Statistical Analysis
+pythonmean_val = np.mean(temp_readings)
+std_val = np.std(temp_readings)
+min_val, max_val = np.min(temp_readings), np.max(temp_readings)
+print(f"Mean temp: {mean_val:.2f}, Std: {std_val:.2f}")
+Cell 4: Linear Algebra
+pythonidentity = np.eye(arr_2d.shape[1])
+result_matrix = np.dot(arr_2d, identity)
+Cell 5: Visualization
+pythonplt.hist(temp_readings, bins=30, alpha=0.7, color='blue')
+plt.xlabel('Temperature')
+plt.ylabel('Frequency')
+plt.title('Sensor Temperature Distribution')
+plt.show()
+Cell 6: Export Results
+pythonnp.savetxt('processed_sensors.csv', np.column_stack((temp_readings, result_matrix)), delimiter=',', header='temp,computed')
+Keywords: numerical computing, arrays, linear algebra, statistics, RISC-V math, sensor data
+Related Packages: SciPy (for advanced stats), Pandas (for tabular loading), Matplotlib (for viz)
+Tags: [risc-v, data-science, arrays]
+PANDAS (v2.3.2)
+Updated: October 06, 2025
+Category: Data Manipulation
+Description: Data manipulation and analysis library
+Key Features:
+
+DataFrame and Series objects
+Data cleaning and transformation
+Time series functionality
+
+RISC-V Considerations:
+
+Use chunksize for large files (e.g., pd.read_csv(chunksize=1000))
+Prefer categorical data types to save memory (df['col'] = df['col'].astype('category'))
+Error handling: Wrap reads in try-except for file I/O issues on low-resource systems
+
+Examples:
+python# Create DataFrame
+df = pd.DataFrame({
+    'Name': ['Alice', 'Bob', 'Charlie'],
+    'Age': [25, 30, 35],
+    'Salary': [50000, 60000, 70000]
+})
+
+# Data operations
+filtered = df[df['Age'] > 25]
+grouped = df.groupby('Age').mean()
+Notebook Template: Data Cleaning and Exploration
+Use Case: Cleaning and analyzing tabular data
+Prompt Example: "Create a Pandas notebook template for cleaning sales data from 'sales_2024.csv' on RISC-V, handling missing values and outliers"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport pandas as pd
+import matplotlib.pyplot as plt  # Cross-ref: Matplotlib for time-series plots
+Cell 2: Load Data
+python# Use chunksize for large files
+try:
+    chunk_iter = pd.read_csv('sales_2024.csv', chunksize=1000)
+    df = pd.concat(chunk_iter, ignore_index=True)
+except FileNotFoundError:
+    print("File not found; using sample data.")
+    df = pd.DataFrame()  # Placeholder
+df['date'] = pd.to_datetime(df['date'], errors='coerce')  # Handle invalid dates
+Cell 3: Data Cleaning
+pythondf = df.dropna(subset=['sales'])
+sales_mean = df['sales'].mean()
+sales_std = df['sales'].std()
+df = df[df['sales'] <= sales_mean + 3 * sales_std]  # Outlier removal
+df['region'] = df['region'].astype('category')  # Memory optimization
+Cell 4: Data Exploration
+pythongrouped = df.groupby('region')['sales'].agg(['mean', 'sum', 'count'])
+monthly_sales = df.set_index('date')['sales'].resample('M').sum()
+print(grouped)
+Cell 5: Visualization
+pythonmonthly_sales.plot(kind='line', color='green')
+plt.title('Monthly Sales Trend')
+plt.xlabel('Date')
+plt.ylabel('Sales')
+plt.show()
+Cell 6: Export Cleaned Data
+pythondf.to_csv('cleaned_sales_2024.csv', index=False)
+Keywords: data analysis, dataframes, cleaning, RISC-V data processing, time series, outliers
+Related Packages: NumPy (array ops), Matplotlib (viz), Scikit-Learn (for modeling post-cleaning)
+Tags: [risc-v, data-manipulation, cleaning]
+MATPLOTLIB (v3.10.5)
+Updated: October 06, 2025
+Category: Data Visualization
+Description: Comprehensive plotting library
+Key Features:
+
+2D and 3D plotting
+Multiple backends
+Publication-quality figures
+
+RISC-V Considerations:
+
+Use agg backend for headless environments: import matplotlib; matplotlib.use('Agg')
+Limit figure complexity for better performance; downsample data if needed
+Error handling: Catch plt.show() exceptions in non-interactive sessions
+
+Examples:
+pythonimport matplotlib.pyplot as plt
+import numpy as np
+
+# Basic plot
+x = np.linspace(0, 10, 100)
+y = np.sin(x)
+
+plt.figure(figsize=(10, 6))
+plt.plot(x, y, label='sin(x)')
+plt.xlabel('X axis')
+plt.ylabel('Y axis')
+plt.title('Sine Wave')
+plt.legend()
+plt.show()
+Notebook Template: Data Visualization Dashboard
+Use Case: Creating publication-ready plots
+Prompt Example: "Generate Matplotlib notebook for visualizing experiment results from 'experiment_data.csv' on RISC-V, including subplots and 3D if applicable"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport matplotlib.pyplot as plt
+import numpy as np
+%matplotlib inline
+plt.style.use('seaborn-v0_8')  # For better defaults
+Cell 2: Data Preparation
+python# Load from CSV
+data = np.genfromtxt('experiment_data.csv', delimiter=',', skip_header=1)
+x = data[:, 0]
+y1 = data[:, 1]  # e.g., control group
+y2 = data[:, 2]  # e.g., treatment group
+categories = ['Control', 'Treatment', 'Baseline']
+values = np.mean([y1, y2], axis=0)[:3]  # Aggregated values
+Cell 3: Basic Line Plot
+pythonplt.figure(figsize=(10, 6))
+plt.plot(x, y1, label='Control', color='blue')
+plt.plot(x, y2, label='Treatment', color='red')
+plt.legend()
+plt.grid(True)
+plt.xlabel('Time')
+plt.ylabel('Measurement')
+plt.title('Experiment Trends')
+plt.show()
+Cell 4: Subplots
+pythonfig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+ax1.plot(x, y1, color='blue')
+ax1.set_title('Control')
+ax2.bar(categories, values, color='green')
+ax2.set_title('Summary Stats')
+plt.tight_layout()
+plt.show()
+Cell 5: 3D Plot (Simplified for RISC-V)
+pythonfrom mpl_toolkits.mplot3d import Axes3D
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(111, projection='3d')
+X, Y = np.meshgrid(x[:50], x[:50])  # Downsample for perf
+Z = np.sin(X) * np.cos(Y)
+ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.8)
+ax.set_title('3D Surface (Downsampled)')
+plt.show()
+Cell 6: Save Figures
+pythonplt.savefig('experiment_analysis.png', dpi=300, bbox_inches='tight')
+Keywords: data visualization, plotting, graphs, RISC-V charts, subplots, 3D
+Related Packages: NumPy (data prep), Pandas (for DataFrame plotting), Seaborn (if available, for stats viz)
+Tags: [risc-v, visualization, plotting]
+SCIKIT-LEARN (v1.7.1)
+Updated: October 06, 2025
+Category: Machine Learning
+Description: Machine learning library
+Key Features:
+
+Classification, regression, clustering algorithms
+Model selection tools
+Preprocessing utilities
+
+RISC-V Considerations:
+
+Use n_jobs=1 for CPU efficiency (avoids threading overhead)
+Prefer ensemble methods with fewer estimators (e.g., n_estimators=50)
+Error handling: Use Pipeline for robust preprocessing; catch convergence warnings
+
+Examples:
+pythonfrom sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.datasets import make_classification
+from sklearn.metrics import accuracy_score
+
+# Generate sample data
+X, y = make_classification(n_samples=1000, n_features=20)
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+# Train model
+clf = RandomForestClassifier(n_estimators=100, n_jobs=1)
+clf.fit(X_train, y_train)
+
+# Predict and evaluate
+y_pred = clf.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+Notebook Template: Supervised Learning Pipeline
+Use Case: Building and evaluating classification models
+Prompt Example: "Use Scikit-Learn template to generate a notebook for binary classification on 'customer_data.csv' on RISC-V, with cross-validation"
+Template Structure:
+Cell 1: Imports and Setup
+pythonfrom sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.datasets import load_iris  # Fallback; prefer CSV
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+Cell 2: Data Loading and Prep
+python# Load real data
+try:
+    df = pd.read_csv('customer_data.csv')  # Assume columns: features..., target
+except FileNotFoundError:
+    iris = load_iris()
+    df = pd.DataFrame(iris.data, columns=iris.feature_names)
+    df['target'] = iris.target
+X, y = df.drop('target', axis=1), df['target']
+Cell 3: Train-Test Split
+pythonX_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+Cell 4: Model Training with Pipeline
+pythonpipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', RandomForestClassifier(n_estimators=50, n_jobs=1, random_state=42))
+])
+pipeline.fit(X_train, y_train)
+Cell 5: Evaluation
+pythony_pred = pipeline.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+cv_scores = cross_val_score(pipeline, X, y, cv=5)
+print(f"Accuracy: {accuracy:.2f}, CV Mean: {cv_scores.mean():.2f}")
+print(classification_report(y_test, y_pred))
+Cell 6: Feature Importance and Save Model
+pythonimport joblib
+importances = pipeline.named_steps['clf'].feature_importances_
+joblib.dump(pipeline, 'sklearn_model.pkl')
+Keywords: machine learning, classification, scikit-learn, RISC-V ML, pipelines, cross-validation
+Related Packages: NumPy/Pandas (data prep), Matplotlib (importance plots), LightGBM (for boosting alternative)
+Tags: [risc-v, ml, classification]
+PYTORCH ECOSYSTEM
+Updated: October 06, 2025
+Category: Deep Learning
+Description: Tensor computation and deep neural networks
+Packages:
+
+torch (v2.9.0a0)
+torchvision (v0.25.0a0)
+torchaudio (v2.8.0a0)
+
+Key Features:
+
+Dynamic computation graphs
+Neural network modules
+Optimization and loss functions
+
+RISC-V Considerations:
+
+CPU-only operations; set device='cpu' explicitly
+Custom RISC-V builds; test ops with torch.allclose for accuracy
+Limited operator support—fallback to NumPy for unsupported (e.g., via torch.from_numpy)
+Monitor memory usage closely; use torch.cuda.empty_cache() analog with gc.collect()
+Error handling: Wrap training in try-except for OOM, reduce batch_size dynamically
+
+Examples:
+pythonimport torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Basic tensor operations
+x = torch.tensor([1.0, 2.0, 3.0])
+y = torch.tensor([4.0, 5.0, 6.0])
+z = x + y
+
+# Simple neural network
+class Net(nn.Module):
+    def __init__(self):
+        super(Net, self).__init__()
+        self.fc1 = nn.Linear(10, 5)
+        self.fc2 = nn.Linear(5, 1)
+    
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+model = Net()
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+Notebook Template: Simple Neural Network Training
+Use Case: Training basic neural networks on tabular data
+Prompt Example: "Generate PyTorch notebook template for training a feedforward net on 'tabular_dataset.csv' in RISC-V CPU-only mode, with early stopping"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import pandas as pd  # For loading
+Cell 2: Data Preparation
+pythondf = pd.read_csv('tabular_dataset.csv')
+X = df.drop('target', axis=1).values.astype(np.float32)
+y = df['target'].values.reshape(-1, 1).astype(np.float32)
+dataset = TensorDataset(torch.from_numpy(X), torch.from_numpy(y))
+dataloader = DataLoader(dataset, batch_size=16, shuffle=True)  # Smaller batch for RISC-V
+Cell 3: Model Definition
+pythonclass SimpleNet(nn.Module):
+    def __init__(self, input_size=10, hidden_size=5, output_size=1):
+        super(SimpleNet, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, output_size)
+    
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+model = SimpleNet(input_size=X.shape[1])
+device = torch.device('cpu')
+model.to(device)
+Cell 4: Training Loop with Early Stopping
+pythoncriterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+num_epochs = 50
+patience = 5
+best_loss = float('inf')
+early_stop_counter = 0
+
+for epoch in range(num_epochs):
+    model.train()
+    epoch_loss = 0
+    try:
+        for batch_x, batch_y in dataloader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            optimizer.zero_grad()
+            outputs = model(batch_x)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            print("OOM: Reducing batch size.")
+            # Adjust dataloader batch_size dynamically if needed
+        raise
+    avg_loss = epoch_loss / len(dataloader)
+    if avg_loss < best_loss:
+        best_loss = avg_loss
+        early_stop_counter = 0
+    else:
+        early_stop_counter += 1
+    if early_stop_counter >= patience:
+        print(f"Early stopping at epoch {epoch}")
+        break
+    print(f"Epoch {epoch}: Loss {avg_loss:.4f}")
+Cell 5: Evaluation
+pythonmodel.eval()
+with torch.no_grad():
+    test_x = torch.from_numpy(np.random.rand(100, X.shape[1]).astype(np.float32)).to(device)
+    predictions = model(test_x)
+    print(f"Sample predictions: {predictions[:5]}")
+Cell 6: Save Model
+pythontorch.save(model.state_dict(), 'pytorch_model.pth')
+Keywords: deep learning, neural networks, pytorch, RISC-V AI, early stopping, CPU training
+Related Packages: NumPy/Pandas (data prep), Torchvision (for image data; see Computer Vision section), Transformers (for NLP integration)
+Tags: [risc-v, dl, neural-nets]
+HUGGING FACE TRANSFORMERS (v4.56.1)
+Updated: October 06, 2025
+Category: Natural Language Processing
+Description: State-of-the-art natural language processing
+Key Features:
+
+Pre-trained models (BERT, GPT, etc.)
+Tokenizers and pipelines
+Model training and fine-tuning
+
+RISC-V Considerations:
+
+Use smaller models (DistilBERT, TinyBERT)
+Limit sequence length (max_length=128)
+Avoid large-scale fine-tuning; use few epochs or PEFT (if supported)
+Error handling: Handle tokenization overflows with truncation=True
+
+Examples:
+pythonfrom transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+
+# Text classification pipeline
+classifier = pipeline('sentiment-analysis')
+result = classifier("I love this package!")
+
+# Custom model usage
+tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+model = AutoModelForSequenceClassification.from_pretrained('bert-base-uncased')
+
+inputs = tokenizer("Hello world!", return_tensors="pt")
+outputs = model(**inputs)
+Notebook Template: Sentiment Analysis Pipeline
+Use Case: NLP tasks with pre-trained models
+Prompt Example: "Create Transformers notebook for sentiment analysis on 'reviews.csv' text dataset in RISC-V, with batch inference"
+Template Structure:
+Cell 1: Imports and Setup
+pythonfrom transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import pandas as pd
+Cell 2: Load Pipeline
+pythonclassifier = pipeline('sentiment-analysis', model='distilbert-base-uncased-finetuned-sst-2-english')
+Cell 3: Sample Inference
+pythontexts = [
+    "This movie is amazing!",
+    "I hate this product.",
+    "It's okay, nothing special."
+]
+results = classifier(texts)
+for text, res in zip(texts, results):
+    print(f"{text} -> {res}")
+Cell 4: Custom Model for Batch Processing
+pythontokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
+model = AutoModelForSequenceClassification.from_pretrained('distilbert-base-uncased')
+inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=128)
+with torch.no_grad():
+    outputs = model(**inputs)
+    logits = outputs.logits
+    predictions = torch.argmax(logits, dim=-1)
+Cell 5: Dataset Integration
+pythondf = pd.read_csv('reviews.csv')  # Assume 'text' column
+df['text'] = df['text'].apply(lambda x: x[:500])  # Truncate for perf
+df['sentiment'] = [classifier(t)[0]['label'] for t in df['text'][:100]]  # Batch limit
+Cell 6: Export Results
+pythondf.to_csv('sentiment_results.csv', index=False)
+Keywords: NLP, transformers, huggingface, RISC-V language models, batch inference, truncation
+Related Packages: torch (backend), pandas (data handling), FAISS (for embedding search; see below)
+Tags: [risc-v, nlp, transformers]
+LANGCHAIN ECOSYSTEM
+Updated: October 06, 2025
+Category: AI Workflows
+Packages:
+
+langchain (v0.3.27)
+langchain-community (v0.3.28)
+langchain-core (v0.3.75)
+
+Description: LLM application framework
+Key Features:
+
+Chain components for complex workflows
+Integration with multiple AI providers
+Local LLM support via Ollama
+
+RISC-V Considerations:
+
+Use smaller local models (e.g., llama2:7b)
+Limit context window size (max_tokens=500)
+Monitor memory during chain execution; use streaming for long responses
+Error handling: Retry chains with exponential backoff for API timeouts
+
+Examples:
+pythonfrom langchain.llms import Ollama
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
+# Initialize Ollama (local LLM)
+llm = Ollama(model="llama2")
+
+# Create prompt template
+prompt = PromptTemplate(
+    input_variables=["topic"],
+    template="Write a short poem about {topic}:"
+)
+
+# Create chain
+chain = LLMChain(llm=llm, prompt=prompt)
+
+# Run chain
+result = chain.run("artificial intelligence")
+Notebook Template: LLM Chain for Content Generation
+Use Case: Building AI chains for tasks like summarization or Q&A
+Prompt Example: "Generate LangChain notebook template for creating a Q&A chain over 'docs.pdf' documents on RISC-V with Ollama, including retrieval"
+Template Structure:
+Cell 1: Imports and Setup
+pythonfrom langchain.llms import Ollama
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain, RetrievalQA
+from langchain_community.vectorstores import FAISS  # See FAISS section
+from langchain.embeddings import HuggingFaceEmbeddings  # See Transformers
+from langchain.document_loaders import PyPDFLoader  # For PDF
+Cell 2: Initialize LLM
+pythonllm = Ollama(model="llama2")
+Cell 3: Simple Chain
+pythonprompt = PromptTemplate(
+    input_variables=["question"],
+    template="Answer the following question concisely: {question}"
+)
+chain = LLMChain(llm=llm, prompt=prompt)
+response = chain.run("What is RISC-V?")
+print(response)
+Cell 4: Retrieval Chain Setup
+pythontry:
+    loader = PyPDFLoader("docs.pdf")
+    docs = loader.load_and_split()  # Split for chunks
+except FileNotFoundError:
+    print("PDF not found; using sample docs.")
+    docs = []  # Placeholder
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+vectorstore = FAISS.from_documents(docs, embeddings)
+qa_chain = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=vectorstore.as_retriever(search_kwargs={"k": 3}))
+Cell 5: Run Retrieval Query
+pythonquery_response = qa_chain.run("What is RISC-V?")
+print(query_response)
+Cell 6: Export Chain Outputs
+pythonimport json
+outputs = {"simple": response, "qa": query_response}
+with open('chain_outputs.json', 'w') as f:
+    json.dump(outputs, f)
+Keywords: langchain, AI workflows, ollama, RISC-V LLM, retrieval QA, PDF loading
+Related Packages: transformers (embeddings), FAISS (vectorstore), OpenAI (cloud alternative; see below)
+Tags: [risc-v, ai-workflows, llm]
+OPENAI & ANTHROPIC INTEGRATION
+Updated: October 06, 2025
+Category: Cloud AI Services
+Packages:
+
+openai (v1.101.0)
+anthropic (v0.64.0)
+
+Description: API clients for commercial AI services
+Key Features:
+
+Chat completion and embeddings
+Streaming responses
+Multiple model support
+
+RISC-V Considerations:
+
+Requires internet connection
+API key authentication needed (use os.environ['OPENAI_API_KEY'])
+No local processing overhead—ideal for heavy lifts
+Error handling: Implement retries with tenacity library if available
+
+Examples:
+pythonfrom openai import OpenAI
+
+# Initialize client (requires API key)
+client = OpenAI(api_key="your-api-key")
+
+# Chat completion
+response = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": "Explain machine learning"}]
+)
+Notebook Template: API-Based Chat Assistant
+Use Case: Interacting with cloud LLMs for code generation
+Prompt Example: "Use OpenAI integration template to generate a notebook for streaming chat responses on RISC-V, with error retry"
+Template Structure:
+Cell 1: Imports and Setup
+pythonfrom openai import OpenAI
+import os
+from tenacity import retry, stop_after_attempt, wait_exponential  # For retries
+Cell 2: Client Initialization
+pythonclient = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))  # Secure key handling
+Cell 3: Simple Chat Completion
+python@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def chat_completion(messages):
+    return client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=messages
+    )
+
+response = chat_completion([{"role": "user", "content": "Write a Python function for factorial."}])
+print(response.choices[0].message.content)
+Cell 4: Streaming Response
+pythonstream = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": "Explain PyTorch on RISC-V."}],
+    stream=True
+)
+full_response = ""
+for chunk in stream:
+    if chunk.choices[0].delta.content is not None:
+        content = chunk.choices[0].delta.content
+        full_response += content
+        print(content, end='', flush=True)  # Live streaming
+print()
+Cell 5: Embeddings Example
+pythonembedding_response = client.embeddings.create(
+    model="text-embedding-ada-002",
+    input="Sample text for embedding."
+)
+embedding = embedding_response.data[0].embedding
+print(f"Embedding length: {len(embedding)}")
+Cell 6: Save Responses
+pythonimport json
+results = {"chat": response.choices[0].message.content, "embedding_len": len(embedding)}
+with open('api_results.json', 'w') as f:
+    json.dump(results, f)
+Keywords: openai, anthropic, cloud AI, API integration, streaming, retries
+Related Packages: langchain (for chaining APIs), transformers (local fallback)
+Tags: [risc-v, cloud-ai, api]
+JUPYTER AI MAGICS (v2.31.6)
+Updated: October 06, 2025
+Category: Jupyter Extensions
+Description: AI-powered magic commands for Jupyter
+Key Features:
+
+%%ai magic command
+Multiple model providers
+Conversation context
+
+RISC-V Considerations:
+
+Works with both local and cloud models
+No additional computational overhead
+Integrate with jupyterlab-lsp for real-time code validation of generated snippets
+
+Examples:
+python# Basic AI magic
+%%ai chatgpt
+Write a Python function to calculate fibonacci numbers
+
+# With formatting
+%%ai chatgpt --format code
+Create a pandas DataFrame with sample sales data
+
+# Conversation context
+%%ai chatgpt
+What is machine learning?
+
+%%ai chatgpt
+Can you explain that in simpler terms?
+Notebook Template: AI-Assisted Code Generation
+Use Case: Generating and refining code interactively
+Prompt Example: "Generate a notebook using Jupyter AI magics template for iterative code refinement on RISC-V, including LSP validation notes"
+Template Structure:
+Cell 1: Setup
+markdown# Explore available models
+%%ai --help
+
+# Enable jupyterlab-lsp for auto-linting generated code (via Extensions menu)
+Cell 2: Generate Initial Code
+python%%ai chatgpt --format code
+Write a function to compute moving average of a NumPy array with window size 3, including error handling for invalid inputs.
+Cell 3: Test Generated Code
+python# Paste and run the generated code (example)
+import numpy as np
+def moving_average(arr, window=3):
+    if window > len(arr):
+        raise ValueError("Window size larger than array length")
+    return np.convolve(arr, np.ones(window)/window, mode='valid')
+
+test_arr = np.array([1, 2, 3, 4, 5])
+print(moving_average(test_arr))
+Cell 4: Refine with Context
+python%%ai chatgpt
+The above function works, but add Pandas compatibility and integrate with a sample DataFrame from 'sales.csv'.
+Cell 5: Conversation for Explanation
+python%%ai chatgpt
+Explain how convolution works in the moving average function, and suggest optimizations for RISC-V.
+Cell 6: Export Session
+python# Use %history -g to save session; or manually
+print("AI-generated code ready for use. Check LSP for issues.")
+Keywords: jupyter AI, magic commands, code generation, LSP integration
+Related Packages: All AI packages; jupyterlab-lsp (for validation; see Extensions section)
+Tags: [risc-v, jupyter, ai-assist]
+COMPUTER VISION PACKAGES
+Updated: October 06, 2025
+Category: Image Processing
+Packages:
+
+opencv-python-headless (v4.12.0.88)
+albumentations (v2.0.8)
+
+Description: Image processing and data augmentation
+Key Features:
+
+Image/video processing
+Data augmentation pipelines
+Computer vision algorithms
+
+RISC-V Considerations:
+
+Use headless OpenCV build
+Limit image resolution for performance (resize to 256x256)
+Batch process images to avoid memory issues; monitor with cv2.getTickCount()
+Error handling: Check cv2.imread return None for failed loads
+
+Examples:
+pythonimport cv2
+import albumentations as A
+
+# Image processing with OpenCV
+image = cv2.imread('image.jpg')
+if image is None:
+    raise ValueError("Image load failed")
+gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+# Data augmentation with Albumentations
+transform = A.Compose([
+    A.RandomCrop(width=256, height=256),
+    A.HorizontalFlip(p=0.5),
+    A.RandomBrightnessContrast(p=0.2),
+])
+augmented = transform(image=image)
+Notebook Template: Image Preprocessing and Augmentation
+Use Case: Processing and augmenting image datasets
+Prompt Example: "Create OpenCV/Albu notebook for augmenting a dataset of images from 'images/' folder on RISC-V, with batch processing"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport cv2
+import albumentations as A
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+Cell 2: Load Image
+pythonimage_path = 'images/sample.jpg'  # Assume folder
+image = cv2.imread(image_path)
+if image is None:
+    raise FileNotFoundError(f"Image not found: {image_path}")
+image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+plt.imshow(image_rgb)
+plt.title('Original')
+plt.show()
+Cell 3: Basic Processing
+pythongray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+edges = cv2.Canny(gray, 100, 200)
+plt.subplot(1, 2, 1)
+plt.imshow(gray, cmap='gray')
+plt.title('Grayscale')
+plt.subplot(1, 2, 2)
+plt.imshow(edges, cmap='gray')
+plt.title('Edges')
+plt.show()
+Cell 4: Augmentation Pipeline
+pythontransform = A.Compose([
+    A.Resize(256, 256),  # Standardize size
+    A.HorizontalFlip(p=0.5),
+    A.RandomBrightnessContrast(p=0.2),
+    A.GaussianBlur(blur_limit=3, p=0.3)
+])
+augmented = transform(image=image)
+aug_image = augmented['image']
+plt.imshow(cv2.cvtColor(aug_image, cv2.COLOR_BGR2RGB))
+plt.title('Augmented')
+plt.show()
+Cell 5: Batch Augmentation
+pythonimage_files = [f for f in os.listdir('images/') if f.endswith('.jpg')][:5]  # Limit batch
+augmented_batch = []
+for img_file in image_files:
+    img = cv2.imread(os.path.join('images/', img_file))
+    if img is not None:
+        aug = transform(image=img)['image']
+        augmented_batch.append(aug)
+print(f"Batch size: {len(augmented_batch)}")
+Cell 6: Save Processed Images
+pythoncv2.imwrite('processed_batch_0.jpg', augmented_batch[0])
+Keywords: computer vision, opencv, image processing, RISC-V CV, batch aug, resize
+Related Packages: NumPy (arrays), Matplotlib (display), Torchvision (if integrating DL)
+Tags: [risc-v, cv, image-processing]
+NATURAL LANGUAGE PROCESSING
+Updated: October 06, 2025
+Category: Text Processing
+Packages:
+
+nltk (v3.9.2)
+spacy (v3.8.7)
+
+Description: Traditional NLP libraries
+Key Features:
+
+Tokenization and POS tagging
+Named entity recognition
+Dependency parsing
+
+RISC-V Considerations:
+
+Use smaller spaCy models (en_core_web_sm)
+Download NLTK data selectively (nltk.download('punkt') only as needed)
+Process texts in batches; limit doc length to 1000 tokens
+Error handling: Handle missing models with spacy.util.is_tokenized
+
+Examples:
+pythonimport nltk
+import spacy
+
+# NLTK example
+from nltk.tokenize import word_tokenize
+text = "This is a sample sentence."
+tokens = word_tokenize(text)
+
+# spaCy example
+nlp = spacy.load("en_core_web_sm")
+doc = nlp("Apple is looking at buying U.K. startup for $1 billion")
+for ent in doc.ents:
+    print(ent.text, ent.label_)
+Notebook Template: Text Preprocessing and NER
+Use Case: Tokenizing and extracting entities from text
+Prompt Example: "Generate NLTK/spaCy notebook for entity recognition on news texts from 'news.jsonl' in RISC-V, with batching"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport nltk
+from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk import pos_tag
+import spacy
+import json
+nltk.download('punkt', quiet=True)
+nltk.download('averaged_perceptron_tagger', quiet=True)
+Cell 2: Load spaCy Model
+pythontry:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("Model not found; download en_core_web_sm.")
+    nlp = None
+Cell 3: NLTK Tokenization and POS
+pythontext = "Apple is looking at buying U.K. startup for $1 billion."
+sentences = sent_tokenize(text)
+tokens = word_tokenize(text)
+pos_tags = pos_tag(tokens)
+print(pos_tags[:5])
+Cell 4: spaCy NER and Analysis
+pythonif nlp:
+    doc = nlp(text)
+    entities = [(ent.text, ent.label_) for ent in doc.ents]
+    print(entities)
+else:
+    entities = []  # Fallback
+Cell 5: Batch Processing
+python# Load batch from JSONL
+texts = []
+try:
+    with open('news.jsonl', 'r') as f:
+        for line in f.readlines()[:10]:  # Limit
+            texts.append(json.loads(line)['text'])
+except FileNotFoundError:
+    texts = [text] * 10  # Sample
+entities_batch = []
+for t in texts:
+    if len(t) > 1000:
+        t = t[:1000]
+    if nlp:
+        doc = nlp(t)
+        entities_batch.extend([(ent.text, ent.label_) for ent in doc.ents])
+Cell 6: Export
+pythonimport pandas as pd
+df_ents = pd.DataFrame(entities_batch, columns=['Entity', 'Label'])
+df_ents.to_csv('entities.csv', index=False)
+Keywords: NLP, text processing, nltk, spacy, RISC-V text analysis, batch NER, token limits
+Related Packages: transformers (modern alternative), pandas (export)
+Tags: [risc-v, nlp, text-processing]
+DATA PROCESSING & UTILITIES
+Updated: October 06, 2025
+Category: Scientific Computing
+Packages:
+
+scipy (v1.16.1)
+dask (2025.7.0)
+distributed (2025.7.0)
+
+Description: Advanced data processing and parallel computing
+Key Features:
+
+Statistical functions and signal processing
+Parallel computing framework
+Out-of-core computations
+
+RISC-V Considerations:
+
+Use Dask for large datasets (client = distributed.Client() for monitoring)
+Monitor memory with parallel operations; set n_workers=1 for stability
+Prefer SciPy's optimized routines; avoid deprecated funcs
+Error handling: Use dask.compute with retries for cluster issues
+
+Examples:
+pythonfrom scipy import stats
+import dask.array as da
+
+# Statistical analysis
+data = [1, 2, 3, 4, 5]
+mean = stats.tmean(data)
+t_test = stats.ttest_1samp(data, 3.0)
+
+# Parallel computing with Dask
+x = da.random.random((10000, 10000), chunks=(1000, 1000))
+y = x + x.T
+z = y.mean(axis=0)
+result = z.compute()
+Notebook Template: Parallel Statistical Analysis
+Use Case: Large-scale stats and computations
+Prompt Example: "Use SciPy/Dask template for a notebook analyzing large arrays from 'big_data.h5' with stats on RISC-V, fault-tolerant"
+Template Structure:
+Cell 1: Imports and Setup
+pythonfrom scipy import stats
+import dask.array as da
+import numpy as np
+from dask.distributed import Client
+client = Client(n_workers=1)  # RISC-V safe
+Cell 2: Small-Scale SciPy Stats
+pythondata_small = np.random.normal(0, 1, 1000)
+mean = stats.tmean(data_small)
+t_stat, p_value = stats.ttest_1samp(data_small, 0)
+print(f"T-stat: {t_stat:.2f}, P-value: {p_value:.4f}")
+Cell 3: Dask for Large Arrays
+python# Assume HDF5 load; fallback random
+x = da.random.normal(0, 1, size=(10000, 10000), chunks=(1000, 1000))
+y = x.mean(axis=0).compute()
+Cell 4: Advanced Stats with Dask
+python# Correlation with error handling
+try:
+    corr_matrix = da.corrcoef(x[:, :100], x.T[:, :100]).compute()  # Subset for perf
+except Exception as e:
+    print(f"Compute error: {e}; reducing chunks")
+    x = x.rechunk((500, 500))
+    corr_matrix = da.corrcoef(x[:, :50], x.T[:, :50]).compute()
+Cell 5: Visualization
+pythonimport matplotlib.pyplot as plt
+plt.hist(data_small, bins=30, alpha=0.7)
+plt.title('Distribution')
+plt.show()
+Cell 6: Save Results
+pythonnp.savetxt('stats_results.csv', y[:1000], delimiter=',')
+Keywords: scientific computing, parallel processing, dask, scipy, fault-tolerant, HDF5
+Related Packages: NumPy (base), Pandas (tabular), Matplotlib (viz)
+Tags: [risc-v, scientific-computing, parallel]
+FAISS (v1.12.0 - Custom RISC-V build)
+Updated: October 06, 2025
+Category: Vector Search
+Description: Similarity search and clustering of dense vectors
+Key Features:
+
+Fast similarity search
+Clustering algorithms
+GPU and CPU support
+
+RISC-V Considerations:
+
+Custom RISC-V build required
+CPU-only operations
+Monitor memory with large indices; prune if >80% RAM (use index.ntotal)
+Error handling: Rebuild index in chunks if add() fails on OOM
+
+Examples:
+pythonimport faiss
+import numpy as np
+
+# Create index
+dimension = 64
+index = faiss.IndexFlatL2(dimension)
+
+# Add vectors
+vectors = np.random.random((1000, dimension)).astype('float32')
+index.add(vectors)
+
+# Search
+query_vector = np.random.random((1, dimension)).astype('float32')
+D, I = index.search(query_vector, 5)  # 5 nearest neighbors
+Notebook Template: Vector Similarity Search
+Use Case: Building vector indexes for fast similarity queries
+Prompt Example: "Generate FAISS notebook for embedding search with HuggingFace on RISC-V, using 'texts.json' dataset"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport faiss
+import numpy as np
+from transformers import AutoTokenizer, AutoModel
+import torch
+import json
+Cell 2: Generate Embeddings
+pythonwith open('texts.json', 'r') as f:
+    texts = [json.loads(line)['text'] for line in f][:900]  # Limit for RISC-V
+tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+model = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+
+def get_embeddings(texts, batch_size=50):  # Batch to avoid OOM
+    embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        inputs = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=128)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        batch_emb = outputs.last_hidden_state.mean(dim=1).numpy().astype('float32')
+        embeddings.append(batch_emb)
+        gc.collect()  # Clean up after batch
+    return np.vstack(embeddings)
+
+embeddings = get_embeddings(texts)
+Cell 3: Build FAISS Index
+pythondimension = embeddings.shape[1]
+index = faiss.IndexFlatL2(dimension)
+try:
+    if embeddings.shape[0] > 500:  # Prune if large
+        index.add(embeddings[:500])
+    else:
+        index.add(embeddings)
+except RuntimeError as e:
+    if "out of memory" in str(e):
+        print("OOM: Pruning further.")
+        index.add(embeddings[:250])  # Additional pruning
+    raise
+print(f"Index size: {index.ntotal}")
+Cell 4: Query Search
+pythonquery_text = "AI on open hardware"
+query_emb = get_embeddings([query_text])
+distances, indices = index.search(query_emb, k=5)
+Cell 5: Retrieve and Display
+pythonfor i, idx in enumerate(indices[0]):
+    if idx < len(texts):
+        print(f"Similar: {texts[idx]} (Distance: {distances[0][i]:.2f})")
+Cell 6: Save Index
+pythonfaiss.write_index(index, 'faiss_index.bin')
+Keywords: vector search, similarity, embeddings, FAISS, batching, pruning
+Related Packages: transformers (embeddings), numpy (vectors), langchain (integration)
+Tags: [risc-v, vector-search, faiss]
+LIGHTGBM (v4.6.0)
+Updated: October 06, 2025
+Category: Machine Learning
+Description: Gradient boosting framework
+Key Features:
+
+Fast training and prediction
+Low memory usage
+Distributed training support
+
+RISC-V Considerations:
+
+CPU-only training; set device='cpu'
+Use feature_fraction=0.8 for efficiency on limited cores
+Monitor memory with large datasets; subsample data if needed
+Error handling: Set verbosity=-1 to suppress logs; catch training exceptions
+
+Examples:
+pythonimport lightgbm as lgb
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X_train, X_test, y_train, y_test = train_test_split(data.data, data.target)
+
+# Create dataset
+train_data = lgb.Dataset(X_train, label=y_train)
+
+# Parameters
+params = {
+    'objective': 'binary',
+    'metric': 'binary_logloss',
+    'num_leaves': 31,
+    'learning_rate': 0.05
+}
+
+# Train model
+gbm = lgb.train(params, train_data, num_boost_round=100)
+Notebook Template: Boosting Model Training
+Use Case: Training gradient boosting models for classification/regression
+Prompt Example: "Use LightGBM template to create a regression notebook for time series forecasting on 'ts_data.csv' on RISC-V, with subsampling"
+Template Structure:
+Cell 1: Imports and Setup
+pythonimport lightgbm as lgb
+from sklearn.model_selection import train_test_split
+from sklearn.datasets import load_breast_cancer  # Fallback
+from sklearn.metrics import accuracy_score, mean_squared_error
+import pandas as pd
+import matplotlib.pyplot as plt
+Cell 2: Data Prep
+pythondf = pd.read_csv('ts_data.csv')  # Assume 'features...', 'target'
+X, y = df.drop('target', axis=1), df['target']
+# Subsample for RISC-V
+X_sample, _, y_sample, _ = train_test_split(X, y, train_size=0.5, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X_sample, y_sample, test_size=0.2, random_state=42)
+train_data = lgb.Dataset(X_train, label=y_train)
+Cell 3: Define Parameters
+pythonparams = {
+    'objective': 'regression',  # For forecasting
+    'metric': 'mse',
+    'num_leaves': 31,
+    'learning_rate': 0.05,
+    'feature_fraction': 0.8,  # Efficiency
+    'verbosity': -1
+}
+Cell 4: Train Model
+pythontry:
+    gbm = lgb.train(params, train_data, num_boost_round=100, valid_sets=[train_data], callbacks=[lgb.early_stopping(10)])
+except Exception as e:
+    print(f"Training error: {e}; reducing boosts")
+    gbm = lgb.train(params, train_data, num_boost_round=50)
+Cell 5: Predict and Evaluate
+pythony_pred = gbm.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+print(f"MSE: {mse:.2f}")
+
+lgb.plot_importance(gbm, max_num_features=10)
+plt.show()
+Cell 6: Save Model
+pythongbm.save_model('lightgbm_model.txt')
+Keywords: gradient boosting, lightgbm, machine learning, regression, subsampling, early stopping
+Related Packages: scikit-learn (metrics), pandas (data), Matplotlib (plots)
+Tags: [risc-v, ml, boosting]
+JUPYTER SPECIFIC EXTENSIONS
+Updated: October 06, 2025
+Category: Development Tools
+Packages:
+
+jupyterlab-git (v0.51.2): Git integration for versioning generated notebooks
+jupyterlab-code-formatter (v3.0.2): Code formatting (Black, isort)
+jupyterlab-lsp (v5.2.0): Language Server Protocol for completions/linting in AI-generated code
+jupyterlab_github (v4.0.0): GitHub integration for sharing notebooks
+
+Description: JupyterLab extensions for enhanced development
+Key Features:
+
+Version control integration
+Real-time code formatting
+Intelligent code completion (aids /generate refinements)
+GitHub integration
+
+RISC-V Considerations:
+
+Extensions run lightweight; no perf hit
+Use LSP with pylsp for Python-specific AI code validation
+Error handling: Format on save to catch indents in generated cells
+
+Examples:
+python# Code formatting with Black (command line)
+# !black my_script.py
+
+# Import sorting with isort
+# !isort my_script.py
+
+# Linting with flake8
+# !flake8 my_script.py
+Notebook Template: Code Quality Workflow
+Use Case: Applying formatting and linting to code
+Prompt Example: "Generate a notebook with dev tools template for linting and formatting a script on RISC-V, integrating LSP notes"
+Template Structure:
+Cell 1: Setup
+markdown# Install/format tools if needed: !pip install black isort flake8 (but env-limited)
+# Run: !black script.py, !isort script.py, !flake8 script.py
+# Enable jupyterlab-lsp + pylsp for real-time feedback on AI code
+Cell 2: Sample Code to Format
+python# Unformatted code
+import pandas as pd
+import numpy as np
+def messy(a,b):return a+b
+df=pd.DataFrame({'a':[1,2]})
+Cell 3: Apply Black Formatting
+python%%writefile temp_script.py
+import pandas as pd
+import numpy as np
+def messy(a,b):return a+b
+df=pd.DataFrame({'a':[1,2]})
+
+!black temp_script.py
+!cat temp_script.py
+Cell 4: Isort and Flake8
+python!isort temp_script.py
+!flake8 temp_script.py
+!cat temp_script.py
+Cell 5: LSP Integration Note
+markdown# With jupyterlab-lsp enabled, hover over code for type hints/errors.
+# Ideal for refining %%ai-generated functions.
+Cell 6: Git Commit
+markdown# Use jupyterlab-git: Stage 'temp_script.py', commit "Formatted AI code", push via GitHub extension
+Keywords: jupyter extensions, code quality, development tools, LSP, git integration
+Related Packages: black, flake8, isort; Jupyter AI magics (for generation)
+Tags: [risc-v, jupyter, dev-tools]
+Workflow Patterns
+Data Analysis Workflow:
+
+Load data with pandas (chunksize for large files)
+Clean and preprocess data (outliers, categoricals)
+Explore with matplotlib/seaborn (subplots, savefigs)
+Build models with scikit-learn or LightGBM (pipelines, CV)
+Evaluate results (metrics, importance plots)
+
+Notebook Template: End-to-End Data Analysis
+Combines templates from Pandas, Matplotlib, Scikit-Learn/LightGBM; add !free -h in eval cell
+Deep Learning Workflow:
+
+Prepare data with torch DataLoader (small batches)
+Define model architecture (CPU device)
+Train with PyTorch (early stopping, OOM handling)
+Evaluate metrics (torch.no_grad)
+Deploy/save model (state_dict)
+
+Notebook Template: DL Training Pipeline
+Uses PyTorch template with torchvision integration; cross-ref Computer Vision for images
+NLP Workflow:
+
+Preprocess text with spaCy/NLTK (batch, truncate)
+Use transformers for embeddings/classification (small models)
+Fine-tune models if needed (few epochs, PEFT)
+Evaluate with appropriate metrics (F1, etc.)
+Build retrieval with FAISS/LangChain
+
+Notebook Template: Full NLP Pipeline
+Integrates spaCy, Transformers, FAISS, and LangChain; add Jupyter AI for prompt refinement
+AI-Assisted Development:
+
+Use Jupyter AI magics for code generation (%%ai --format code)
+Leverage LangChain for complex AI workflows (retrieval QA)
+Integrate with local (Ollama) or cloud AI services (retries)
+Test and refine generated code (LSP linting, unit tests)
+Version with jupyterlab-git
+
+Notebook Template: Hybrid AI Development
+Combines Jupyter AI magics with LangChain and Extensions; include export to GitHub
+Environment Constraints
+Running on RISC-V architecture (as of Oct 2025)
+Some packages may have performance limitations—test with %timeit
+Memory-intensive operations may require optimization (e.g., gc.collect() after big ops)
+GPU acceleration not available (CPU-only PyTorch; no CUDA)
+For notebook generation: Prioritize small batches, avoid heavy fine-tuning, use pre-trained models, include error handling
+Maintenance Note: Check for updates quarterly; versions pinned to stable RISC-V builds
+Common Integration Patterns
+NumPy + Matplotlib
+pythonimport numpy as np
+import matplotlib.pyplot as plt
+
+data = np.random.randn(1000)
+plt.hist(data, bins=30, figsize=(8,5))
+plt.savefig('hist.png', dpi=150)  # Optimized save
+plt.show()
+Pandas + Scikit-learn
+pythonimport pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+
+df = pd.read_csv('data.csv', chunksize=1000)
+df = pd.concat(df)  # For small data
+X, y = df.drop('target', axis=1), df['target']
+pipeline = Pipeline([('clf', RandomForestClassifier(n_jobs=1))])
+pipeline.fit(X, y)
+Transformers + FAISS
+pythonfrom transformers import AutoTokenizer, AutoModel
+import faiss
+import torch
+
+tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+model = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+texts = ["doc1", "doc2"]
+inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+with torch.no_grad():
+    embeddings = model(**inputs).last_hidden_state.mean(dim=1).numpy()
+index = faiss.IndexFlatL2(embeddings.shape[1])
+index.add(embeddings)
+LangChain + OpenAI
+pythonfrom langchain.llms import OpenAI
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+
+llm = OpenAI(model="gpt-3.5-turbo")
+prompt = PromptTemplate(input_variables=["q"], template="Q: {q}\nA:")
+chain = LLMChain(llm=llm, prompt=prompt)
+chain.run("What is RISC-V?")
+This document provides comprehensive coverage of the available packages and their typical usage patterns in this RISC-V Jupyter environment, including optimized notebook templates for /generate commands to ensure efficient, environment-aware notebook creation. Enhanced with cross-references, error handling, and diverse examples for better embedding retrieval.
