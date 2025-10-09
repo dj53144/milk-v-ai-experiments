@@ -1,5 +1,6 @@
 Distributed NVMe Computational Storage Cluster
-If you successfully implement the NVMe computational storage system, you can leverage a cluster of computers to create a massively scalable distributed computation system. Here's how to extend the architecture:
+If you successfully implement the NVMe computational storage system, you can leverage a cluster of computers to create
+a massively scalable distributed computation system. Here's how to extend the architecture:
 
 1. Distributed System Architecture
 1.1 Cluster Overview
