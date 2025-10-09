@@ -1,6 +1,14 @@
 NVMe-Based Computational Storage Engine: Transforming Storage Devices into Computational Units
 Abstract
-This project presents a novel framework that repurposes NVMe storage devices as computational engines, enabling direct in-storage processing of tensor operations and machine learning workloads. By implementing a custom Linux kernel driver that intercepts and transforms storage I/O operations into computational tasks, we create a hybrid storage-compute architecture that reduces data movement between storage and processing units. The system exposes a standard block device interface while transparently handling computational requests, with seamless integration into PyTorch through custom autograd functions and C++ extensions. This approach demonstrates significant potential for data-intensive machine learning applications where I/O bottlenecks traditionally limit performance, offering a new paradigm for computational storage in deep learning infrastructure.
+This project presents a novel framework that repurposes NVMe storage devices as computational engines, enabling direct 
+in-storage processing of tensor operations and machine learning workloads. By implementing a custom Linux kernel 
+driver that intercepts and transforms storage I/O operations into computational tasks, we create a hybrid storage-
+compute architecture that reduces data movement between storage and processing units. The system exposes a standard 
+block device interface while transparently handling computational requests, with seamless integration into PyTorch 
+through custom autograd functions and C++ extensions. This approach demonstrates significant potential for data-
+intensive machine learning applications where I/O bottlenecks traditionally limit performance, offering a new paradigm
+for computational storage in deep learning infrastructure.
+
 
 1. Project Architecture Overview
 System Components
