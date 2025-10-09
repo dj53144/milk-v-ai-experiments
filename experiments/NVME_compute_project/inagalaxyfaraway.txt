@@ -1,0 +1,1256 @@
+Distributed NVMe Computational Storage Cluster
+If you successfully implement the NVMe computational storage system, you can leverage a cluster of computers to create a massively scalable distributed computation system. Here's how to extend the architecture:
+
+1. Distributed System Architecture
+1.1 Cluster Overview
+text
+┌─────────────────────────────────────────────────────────────────┐
+│                    Cluster Coordinator                          │
+│                                                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
+│  │ Task        │  │ Node        │  │ Data        │             │
+│  │ Scheduler   │  │ Manager     │  │ Distributor │             │
+│  └─────────────┘  └─────────────┘  └─────────────┘             │
+└─────────────────────────────────────────────────────────────────┘
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+        ▼                ▼                ▼
+┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│  Compute      │  │  Compute      │  │  Compute      │
+│  Node 1       │  │  Node 2       │  │  Node N       │
+│               │  │               │  │               │
+│ ┌───────────┐ │  │ ┌───────────┐ │  │ ┌───────────┐ │
+│ │NVMe Drive │ │  │ │NVMe Drive │ │  │ │NVMe Drive │ │
+│ │Compute    │ │  │ │Compute    │ │  │ │Compute    │ │
+│ │Engine     │ │  │ │Engine     │ │  │ │Engine     │ │
+│ └───────────┘ │  │ └───────────┘ │  │ └───────────┘ │
+└───────────────┘  └───────────────┘  └───────────────┘
+1.2 Distributed Coordinator Service
+python
+# distributed_coordinator.py
+import asyncio
+import json
+import time
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+from enum import Enum
+import aiohttp
+import numpy as np
+import torch
+from consistent_hash import ConsistentHash
+
+class NodeStatus(Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    BUSY = "busy"
+    MAINTENANCE = "maintenance"
+
+@dataclass
+class ComputeNode:
+    node_id: str
+    host: str
+    port: int
+    capacity: float  # Compute capacity score
+    memory: int      # Available memory
+    storage: int     # Available NVMe storage
+    status: NodeStatus
+    last_heartbeat: float
+    gpu_available: bool = False
+
+@dataclass
+class ComputeTask:
+    task_id: str
+    operation: str
+    inputs: List[Any]
+    output_shape: List[int]
+    output_dtype: torch.dtype
+    priority: int = 1
+    dependencies: List[str] = None
+    node_assignment: str = None
+    status: str = "pending"
+
+class DistributedNVMeCoordinator:
+    def __init__(self, coordinator_host="0.0.0.0", coordinator_port=8000):
+        self.nodes: Dict[str, ComputeNode] = {}
+        self.tasks: Dict[str, ComputeTask] = {}
+        self.task_queue = asyncio.PriorityQueue()
+        self.hash_ring = ConsistentHash()
+        self.coordinator_host = coordinator_host
+        self.coordinator_port = coordinator_port
+        
+        # Statistics
+        self.tasks_completed = 0
+        self.tasks_failed = 0
+        self.total_compute_time = 0.0
+        
+    async def register_node(self, node_id: str, host: str, port: int, 
+                          capacity: float, memory: int, storage: int):
+        """Register a new compute node with the cluster"""
+        node = ComputeNode(
+            node_id=node_id,
+            host=host,
+            port=port,
+            capacity=capacity,
+            memory=memory,
+            storage=storage,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time()
+        )
+        
+        self.nodes[node_id] = node
+        self.hash_ring.add_node(node_id)
+        
+        print(f"Node {node_id} registered at {host}:{port}")
+        
+    async def submit_task(self, operation: str, inputs: List[Any], 
+                         output_shape: List[int], output_dtype: torch.dtype,
+                         priority: int = 1) -> str:
+        """Submit a computation task to the cluster"""
+        task_id = f"task_{int(time.time() * 1000)}_{len(self.tasks)}"
+        
+        task = ComputeTask(
+            task_id=task_id,
+            operation=operation,
+            inputs=inputs,
+            output_shape=output_shape,
+            output_dtype=output_dtype,
+            priority=priority
+        )
+        
+        self.tasks[task_id] = task
+        await self.task_queue.put((priority, task_id))
+        
+        # Trigger task assignment
+        asyncio.create_task(self._assign_tasks())
+        
+        return task_id
+    
+    async def _assign_tasks(self):
+        """Assign pending tasks to available nodes"""
+        while not self.task_queue.empty():
+            priority, task_id = await self.task_queue.get()
+            task = self.tasks[task_id]
+            
+            # Find suitable node using consistent hashing
+            target_node_id = self.hash_ring.get_node(task_id)
+            target_node = self.nodes.get(target_node_id)
+            
+            if target_node and target_node.status == NodeStatus.ONLINE:
+                task.node_assignment = target_node_id
+                task.status = "assigned"
+                
+                # Send task to node
+                success = await self._send_task_to_node(target_node, task)
+                
+                if not success:
+                    # Task failed, reassign with lower priority
+                    task.status = "pending"
+                    task.priority += 1  # Lower priority
+                    await self.task_queue.put((task.priority, task_id))
+            else:
+                # No suitable node found, re-queue
+                await self.task_queue.put((priority, task_id))
+    
+    async def _send_task_to_node(self, node: ComputeNode, task: ComputeTask) -> bool:
+        """Send a task to a specific compute node"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Prepare task data
+                task_data = {
+                    'task_id': task.task_id,
+                    'operation': task.operation,
+                    'inputs': self._serialize_inputs(task.inputs),
+                    'output_shape': task.output_shape,
+                    'output_dtype': str(task.output_dtype)
+                }
+                
+                async with session.post(
+                    f"http://{node.host}:{node.port}/execute",
+                    json=task_data,
+                    timeout=aiohttp.ClientTimeout(total=300)
+                ) as response:
+                    
+                    if response.status == 200:
+                        result_data = await response.json()
+                        # Store result (in production, this would be more sophisticated)
+                        task.status = "completed"
+                        self.tasks_completed += 1
+                        return True
+                    else:
+                        task.status = "failed"
+                        self.tasks_failed += 1
+                        return False
+                        
+        except Exception as e:
+            print(f"Failed to send task to node {node.node_id}: {e}")
+            task.status = "failed"
+            self.tasks_failed += 1
+            return False
+    
+    def _serialize_inputs(self, inputs: List[Any]) -> List[Any]:
+        """Serialize inputs for network transmission"""
+        serialized = []
+        for inp in inputs:
+            if isinstance(inp, torch.Tensor):
+                # Convert tensor to serializable format
+                serialized.append({
+                    'type': 'tensor',
+                    'shape': inp.shape,
+                    'dtype': str(inp.dtype),
+                    'data': inp.cpu().numpy().tolist()  # For small tensors
+                })
+            else:
+                serialized.append(inp)
+        return serialized
+    
+    async def start_coordinator(self):
+        """Start the coordinator HTTP server"""
+        from aiohttp import web
+        
+        app = web.Application()
+        
+        # Add routes
+        app.router.add_post('/register', self.handle_register)
+        app.router.add_post('/submit', self.handle_submit)
+        app.router.add_get('/status', self.handle_status)
+        app.router.add_get('/nodes', self.handle_nodes)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.coordinator_host, self.coordinator_port)
+        await site.start()
+        
+        print(f"Coordinator running on {self.coordinator_host}:{self.coordinator_port}")
+        
+        # Start background tasks
+        asyncio.create_task(self._monitor_nodes())
+        asyncio.create_task(self._cleanup_tasks())
+    
+    async def handle_register(self, request):
+        """Handle node registration"""
+        data = await request.json()
+        await self.register_node(
+            data['node_id'],
+            data['host'],
+            data['port'],
+            data['capacity'],
+            data['memory'],
+            data['storage']
+        )
+        return web.json_response({'status': 'registered'})
+    
+    async def handle_submit(self, request):
+        """Handle task submission"""
+        data = await request.json()
+        task_id = await self.submit_task(
+            data['operation'],
+            data['inputs'],
+            data['output_shape'],
+            torch.dtype(data['output_dtype']),
+            data.get('priority', 1)
+        )
+        return web.json_response({'task_id': task_id, 'status': 'submitted'})
+    
+    async def handle_status(self, request):
+        """Return cluster status"""
+        status = {
+            'nodes_online': len([n for n in self.nodes.values() if n.status == NodeStatus.ONLINE]),
+            'nodes_total': len(self.nodes),
+            'tasks_pending': self.task_queue.qsize(),
+            'tasks_completed': self.tasks_completed,
+            'tasks_failed': self.tasks_failed,
+            'total_compute_time': self.total_compute_time
+        }
+        return web.json_response(status)
+    
+    async def handle_nodes(self, request):
+        """Return node information"""
+        nodes_info = {}
+        for node_id, node in self.nodes.items():
+            nodes_info[node_id] = {
+                'host': node.host,
+                'port': node.port,
+                'status': node.status.value,
+                'capacity': node.capacity,
+                'memory': node.memory,
+                'storage': node.storage
+            }
+        return web.json_response(nodes_info)
+    
+    async def _monitor_nodes(self):
+        """Monitor node health"""
+        while True:
+            current_time = time.time()
+            for node in self.nodes.values():
+                if current_time - node.last_heartbeat > 30:  # 30 seconds timeout
+                    node.status = NodeStatus.OFFLINE
+                    print(f"Node {node.node_id} marked as offline")
+            
+            await asyncio.sleep(10)  # Check every 10 seconds
+    
+    async def _cleanup_tasks(self):
+        """Clean up old completed tasks"""
+        while True:
+            current_time = time.time()
+            # Remove tasks older than 1 hour
+            # Implementation depends on how you store task results
+            await asyncio.sleep(3600)  # Cleanup every hour
+1.3 Consistent Hashing Implementation
+python
+# consistent_hash.py
+import hashlib
+from bisect import bisect_right
+from typing import List, Optional
+
+class ConsistentHash:
+    def __init__(self, nodes: List[str] = None, virtual_nodes: int = 100):
+        self.virtual_nodes = virtual_nodes
+        self.ring = {}
+        self.sorted_keys = []
+        
+        if nodes:
+            for node in nodes:
+                self.add_node(node)
+    
+    def add_node(self, node: str):
+        """Add a node to the hash ring"""
+        for i in range(self.virtual_nodes):
+            key = self._hash(f"{node}:{i}")
+            self.ring[key] = node
+            self.sorted_keys.append(key)
+        
+        self.sorted_keys.sort()
+    
+    def remove_node(self, node: str):
+        """Remove a node from the hash ring"""
+        for i in range(self.virtual_nodes):
+            key = self._hash(f"{node}:{i}")
+            if key in self.ring:
+                del self.ring[key]
+                self.sorted_keys.remove(key)
+    
+    def get_node(self, key: str) -> Optional[str]:
+        """Get the node responsible for a key"""
+        if not self.ring:
+            return None
+        
+        hash_key = self._hash(key)
+        idx = bisect_right(self.sorted_keys, hash_key)
+        
+        if idx == len(self.sorted_keys):
+            idx = 0
+        
+        return self.ring[self.sorted_keys[idx]]
+    
+    def _hash(self, key: str) -> int:
+        """Generate a hash for the key"""
+        return int(hashlib.md5(key.encode()).hexdigest(), 16)
+2. Distributed Compute Node
+2.1 Node Service Implementation
+python
+# compute_node.py
+import asyncio
+import torch
+import aiohttp
+from aiohttp import web
+import json
+import time
+from typing import Dict, Any
+import nvme_compute_extension as nvme
+
+class DistributedComputeNode:
+    def __init__(self, node_id: str, coordinator_host: str, coordinator_port: int,
+                 host: str = "0.0.0.0", port: int = 8080):
+        self.node_id = node_id
+        self.coordinator_host = coordinator_host
+        self.coordinator_port = coordinator_port
+        self.host = host
+        self.port = port
+        
+        self.compute_engine = nvme.NVMeComputeEngine()
+        self.active_tasks: Dict[str, asyncio.Task] = {}
+        
+        # Node capabilities
+        self.capacity = self._calculate_capacity()
+        self.memory = self._get_available_memory()
+        self.storage = self._get_available_storage()
+        
+    def _calculate_capacity(self) -> float:
+        """Calculate node compute capacity score"""
+        # Consider CPU cores, memory, NVMe speed, etc.
+        import multiprocessing
+        cpu_cores = multiprocessing.cpu_count()
+        
+        # Simple capacity calculation - refine based on your needs
+        capacity = cpu_cores * 100  # Base score per core
+        
+        # Add bonus for NVMe compute capability
+        capacity += 500  # NVMe compute bonus
+        
+        return capacity
+    
+    def _get_available_memory(self) -> int:
+        """Get available memory in bytes"""
+        import psutil
+        return psutil.virtual_memory().available
+    
+    def _get_available_storage(self) -> int:
+        """Get available NVMe storage in bytes"""
+        import shutil
+        total, used, free = shutil.disk_usage("/")
+        return free
+    
+    async def register_with_coordinator(self):
+        """Register this node with the cluster coordinator"""
+        registration_data = {
+            'node_id': self.node_id,
+            'host': self.host,
+            'port': self.port,
+            'capacity': self.capacity,
+            'memory': self.memory,
+            'storage': self.storage
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://{self.coordinator_host}:{self.coordinator_port}/register",
+                    json=registration_data
+                ) as response:
+                    
+                    if response.status == 200:
+                        print(f"Node {self.node_id} successfully registered with coordinator")
+                        return True
+                    else:
+                        print(f"Failed to register node: {response.status}")
+                        return False
+        except Exception as e:
+            print(f"Error registering with coordinator: {e}")
+            return False
+    
+    async def execute_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a computation task"""
+        task_id = task_data['task_id']
+        operation = task_data['operation']
+        
+        try:
+            # Deserialize inputs
+            inputs = self._deserialize_inputs(task_data['inputs'])
+            
+            # Execute operation
+            start_time = time.time()
+            
+            if operation == "matrix_multiply":
+                result = await self._execute_matrix_multiply(inputs)
+            elif operation == "relu":
+                result = await self._execute_relu(inputs)
+            elif operation == "conv2d":
+                result = await self._execute_conv2d(inputs, task_data)
+            else:
+                raise ValueError(f"Unknown operation: {operation}")
+            
+            execution_time = time.time() - start_time
+            
+            # Serialize result
+            result_data = self._serialize_result(result)
+            result_data['execution_time'] = execution_time
+            result_data['node_id'] = self.node_id
+            
+            return result_data
+            
+        except Exception as e:
+            print(f"Task {task_id} failed: {e}")
+            return {'error': str(e), 'node_id': self.node_id}
+    
+    async def _execute_matrix_multiply(self, inputs: List[Any]) -> torch.Tensor:
+        """Execute matrix multiplication"""
+        a = inputs[0]
+        b = inputs[1]
+        return self.compute_engine.matrix_multiply(a, b)
+    
+    async def _execute_relu(self, inputs: List[Any]) -> torch.Tensor:
+        """Execute ReLU activation"""
+        input_tensor = inputs[0]
+        return self.compute_engine.relu(input_tensor)
+    
+    async def _execute_conv2d(self, inputs: List[Any], task_data: Dict[str, Any]) -> torch.Tensor:
+        """Execute 2D convolution"""
+        # This would use the conv2d implementation from your NVMe extension
+        input_tensor = inputs[0]
+        weight = inputs[1]
+        bias = inputs[2] if len(inputs) > 2 else None
+        
+        # Extract convolution parameters
+        stride = task_data.get('stride', [1, 1])
+        padding = task_data.get('padding', [0, 0])
+        dilation = task_data.get('dilation', [1, 1])
+        
+        # Use NVMe compute engine for convolution
+        # (You would need to extend your C++ extension for this)
+        return input_tensor  # Placeholder
+    
+    def _deserialize_inputs(self, inputs: List[Any]) -> List[Any]:
+        """Deserialize inputs from network format"""
+        deserialized = []
+        for inp in inputs:
+            if isinstance(inp, dict) and inp.get('type') == 'tensor':
+                # Reconstruct tensor
+                tensor_data = torch.tensor(inp['data'], dtype=torch.float32)
+                tensor_data = tensor_data.reshape(inp['shape'])
+                deserialized.append(tensor_data)
+            else:
+                deserialized.append(inp)
+        return deserialized
+    
+    def _serialize_result(self, result: torch.Tensor) -> Dict[str, Any]:
+        """Serialize result for network transmission"""
+        if isinstance(result, torch.Tensor):
+            return {
+                'type': 'tensor',
+                'shape': result.shape,
+                'dtype': str(result.dtype),
+                'data': result.cpu().numpy().tolist()
+            }
+        else:
+            return {'value': result}
+    
+    async def start_node(self):
+        """Start the compute node HTTP server"""
+        app = web.Application()
+        
+        # Add routes
+        app.router.add_post('/execute', self.handle_execute)
+        app.router.add_get('/health', self.handle_health)
+        app.router.add_get('/stats', self.handle_stats)
+        
+        # Register with coordinator
+        await self.register_with_coordinator()
+        
+        # Start heartbeat
+        asyncio.create_task(self._send_heartbeat())
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.port)
+        await site.start()
+        
+        print(f"Compute node {self.node_id} running on {self.host}:{self.port}")
+    
+    async def handle_execute(self, request):
+        """Handle task execution requests"""
+        task_data = await request.json()
+        task_id = task_data['task_id']
+        
+        # Create async task for execution
+        task = asyncio.create_task(self.execute_task(task_data))
+        self.active_tasks[task_id] = task
+        
+        try:
+            result = await task
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({'error': str(e)}, status=500)
+        finally:
+            self.active_tasks.pop(task_id, None)
+    
+    async def handle_health(self, request):
+        """Health check endpoint"""
+        health_status = {
+            'node_id': self.node_id,
+            'status': 'healthy',
+            'active_tasks': len(self.active_tasks),
+            'capacity': self.capacity,
+            'memory': self.memory,
+            'storage': self.storage
+        }
+        return web.json_response(health_status)
+    
+    async def handle_stats(self, request):
+        """Node statistics endpoint"""
+        stats = {
+            'node_id': self.node_id,
+            'capacity': self.capacity,
+            'memory_available': self.memory,
+            'storage_available': self.storage,
+            'active_tasks': len(self.active_tasks)
+        }
+        return web.json_response(stats)
+    
+    async def _send_heartbeat(self):
+        """Send periodic heartbeat to coordinator"""
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    # In a real implementation, you'd send heartbeat to coordinator
+                    # For now, we'll just update registration periodically
+                    await self.register_with_coordinator()
+            except Exception as e:
+                print(f"Heartbeat failed: {e}")
+            
+            await asyncio.sleep(30)  # Send heartbeat every 30 seconds
+3. Distributed PyTorch Integration
+3.1 Distributed Autograd Functions
+python
+# distributed_autograd.py
+import torch
+import torch.nn as nn
+from torch.autograd import Function
+import asyncio
+import aiohttp
+from typing import List, Any
+
+class DistributedMatrixMultiply(Function):
+    @staticmethod
+    def forward(ctx, input1, input2, coordinator_url, priority=1):
+        ctx.coordinator_url = coordinator_url
+        ctx.save_for_backward(input1, input2)
+        ctx.priority = priority
+        
+        # Submit task to distributed cluster
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            result = loop.run_until_complete(
+                submit_distributed_task(
+                    coordinator_url,
+                    "matrix_multiply",
+                    [input1, input2],
+                    [input1.size(0), input2.size(1)],
+                    input1.dtype,
+                    priority
+                )
+            )
+            return result
+        finally:
+            loop.close()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input1, input2 = ctx.saved_tensors
+        coordinator_url = ctx.coordinator_url
+        
+        # Compute gradients using distributed cluster
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # dL/dA = dL/dC * B^T
+            grad_input1 = loop.run_until_complete(
+                submit_distributed_task(
+                    coordinator_url,
+                    "matrix_multiply",
+                    [grad_output, input2.transpose(0, 1)],
+                    [grad_output.size(0), input2.size(0)],
+                    grad_output.dtype,
+                    ctx.priority
+                )
+            )
+            
+            # dL/dB = A^T * dL/dC
+            grad_input2 = loop.run_until_complete(
+                submit_distributed_task(
+                    coordinator_url,
+                    "matrix_multiply",
+                    [input1.transpose(0, 1), grad_output],
+                    [input1.size(1), grad_output.size(1)],
+                    grad_output.dtype,
+                    ctx.priority
+                )
+            )
+            
+            return grad_input1, grad_input2, None, None
+        finally:
+            loop.close()
+
+async def submit_distributed_task(coordinator_url: str, operation: str, 
+                                inputs: List[torch.Tensor], output_shape: List[int],
+                                output_dtype: torch.dtype, priority: int = 1) -> torch.Tensor:
+    """Submit a task to the distributed cluster and await result"""
+    # Serialize inputs
+    serialized_inputs = []
+    for inp in inputs:
+        serialized_inputs.append({
+            'type': 'tensor',
+            'shape': inp.shape,
+            'dtype': str(inp.dtype),
+            'data': inp.cpu().numpy().tolist()
+        })
+    
+    task_data = {
+        'operation': operation,
+        'inputs': serialized_inputs,
+        'output_shape': output_shape,
+        'output_dtype': str(output_dtype),
+        'priority': priority
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"http://{coordinator_url}/submit",
+            json=task_data
+        ) as response:
+            
+            if response.status == 200:
+                result_data = await response.json()
+                task_id = result_data['task_id']
+                
+                # Poll for result (in production, use WebSockets or message queue)
+                return await _poll_for_result(coordinator_url, task_id)
+            else:
+                raise RuntimeError(f"Failed to submit task: {response.status}")
+
+async def _poll_for_result(coordinator_url: str, task_id: str, 
+                          poll_interval: float = 0.1) -> torch.Tensor:
+    """Poll for task completion and retrieve result"""
+    # In production, you'd use a more efficient mechanism like WebSockets
+    # or a message queue rather than polling
+    
+    async with aiohttp.ClientSession() as session:
+        while True:
+            # Check task status (you'd need to implement this endpoint)
+            await asyncio.sleep(poll_interval)
+            
+            # This is a simplified implementation
+            # In reality, you'd have a proper task status endpoint
+
+class DistributedLinear(nn.Module):
+    def __init__(self, in_features: int, out_features: int, 
+                 coordinator_url: str = "localhost:8000"):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.coordinator_url = coordinator_url
+        
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
+        self.bias = nn.Parameter(torch.randn(out_features))
+    
+    def forward(self, x):
+        # Use distributed matrix multiplication for large inputs
+        if x.numel() > 1000000:  # Use distributed for large matrices
+            output = DistributedMatrixMultiply.apply(
+                x, self.weight, self.coordinator_url, 1
+            )
+            output += self.bias
+        else:
+            # Use local computation for small matrices
+            output = torch.matmul(x, self.weight.t()) + self.bias
+            
+        return output
+3.2 Model Parallelism Across Cluster
+python
+# model_parallel.py
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Dict, Any
+import asyncio
+import aiohttp
+
+class DistributedModelParallel:
+    def __init__(self, coordinator_url: str, model_parts: Dict[str, Any]):
+        self.coordinator_url = coordinator_url
+        self.model_parts = model_parts  # Map of layer names to node assignments
+        self.layer_outputs = {}  # Cache for intermediate results
+    
+    async def forward(self, x: torch.Tensor, layer_path: List[str]) -> torch.Tensor:
+        """Execute forward pass across multiple nodes"""
+        current_input = x
+        
+        for layer_name in layer_path:
+            node_id = self.model_parts[layer_name]['node']
+            layer_spec = self.model_parts[layer_name]['spec']
+            
+            # Send layer computation to appropriate node
+            result = await self._execute_layer_on_node(
+                node_id, layer_name, layer_spec, current_input
+            )
+            
+            current_input = result
+            self.layer_outputs[layer_name] = result
+        
+        return current_input
+    
+    async def backward(self, grad_output: torch.Tensor, layer_path: List[str]):
+        """Execute backward pass across multiple nodes"""
+        current_grad = grad_output
+        
+        for layer_name in reversed(layer_path):
+            node_id = self.model_parts[layer_name]['node']
+            layer_input = self.layer_outputs.get(layer_name + "_input")
+            layer_output = self.layer_outputs.get(layer_name)
+            
+            # Compute gradients for this layer
+            layer_grads = await self._compute_layer_gradients(
+                node_id, layer_name, layer_input, layer_output, current_grad
+            )
+            
+            current_grad = layer_grads['input_grad']
+            
+            # Update layer parameters (would be done on the node)
+            await self._update_layer_parameters(node_id, layer_name, layer_grads)
+    
+    async def _execute_layer_on_node(self, node_id: str, layer_name: str, 
+                                   layer_spec: Dict[str, Any], 
+                                   input_tensor: torch.Tensor) -> torch.Tensor:
+        """Execute a layer on a specific node"""
+        task_data = {
+            'operation': 'layer_forward',
+            'layer_name': layer_name,
+            'layer_spec': layer_spec,
+            'input': self._serialize_tensor(input_tensor)
+        }
+        
+        # This would use your node communication mechanism
+        # Simplified implementation
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://{node_id}/execute_layer",
+                json=task_data
+            ) as response:
+                
+                if response.status == 200:
+                    result_data = await response.json()
+                    return self._deserialize_tensor(result_data['output'])
+                else:
+                    raise RuntimeError(f"Layer execution failed: {response.status}")
+    
+    def _serialize_tensor(self, tensor: torch.Tensor) -> Dict[str, Any]:
+        return {
+            'type': 'tensor',
+            'shape': tensor.shape,
+            'dtype': str(tensor.dtype),
+            'data': tensor.cpu().numpy().tolist()
+        }
+    
+    def _deserialize_tensor(self, data: Dict[str, Any]) -> torch.Tensor:
+        if data['type'] == 'tensor':
+            return torch.tensor(data['data']).reshape(data['shape'])
+        return data
+
+# Example of splitting a large model across nodes
+def create_distributed_model(coordinator_url: str, num_nodes: int):
+    """Create a model split across multiple nodes"""
+    model_parts = {
+        'conv1': {'node': 'node1', 'spec': {'type': 'conv2d', 'in_channels': 3, 'out_channels': 64}},
+        'conv2': {'node': 'node2', 'spec': {'type': 'conv2d', 'in_channels': 64, 'out_channels': 128}},
+        'fc1': {'node': 'node3', 'spec': {'type': 'linear', 'in_features': 128*7*7, 'out_features': 512}},
+        'fc2': {'node': 'node4', 'spec': {'type': 'linear', 'in_features': 512, 'out_features': 10}},
+    }
+    
+    return DistributedModelParallel(coordinator_url, model_parts)
+4. Data Parallelism with NVMe Storage
+4.1 Distributed DataLoader
+python
+# distributed_dataloader.py
+import torch
+from torch.utils.data import Dataset, DataLoader
+import asyncio
+import aiohttp
+from typing import List, Any, Optional
+import numpy as np
+
+class DistributedNVMeDataset(Dataset):
+    def __init__(self, data_size: int, num_samples: int, coordinator_url: str,
+                 node_id: str, shard_id: int, total_shards: int):
+        self.data_size = data_size
+        self.num_samples = num_samples
+        self.coordinator_url = coordinator_url
+        self.node_id = node_id
+        self.shard_id = shard_id
+        self.total_shards = total_shards
+        
+        # Calculate shard boundaries
+        self.samples_per_shard = num_samples // total_shards
+        self.start_idx = shard_id * self.samples_per_shard
+        self.end_idx = self.start_idx + self.samples_per_shard
+        
+        # Preload data indices that belong to this shard
+        self.indices = list(range(self.start_idx, self.end_idx))
+    
+    def __len__(self):
+        return len(self.indices)
+    
+    def __getitem__(self, idx):
+        global_idx = self.indices[idx]
+        
+        # Use distributed storage to retrieve data
+        # In production, this would use your NVMe storage system
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            data = loop.run_until_complete(
+                self._retrieve_from_distributed_storage(global_idx)
+            )
+            return data
+        finally:
+            loop.close()
+    
+    async def _retrieve_from_distributed_storage(self, global_idx: int) -> torch.Tensor:
+        """Retrieve data from distributed NVMe storage"""
+        # Determine which node stores this data item
+        storage_node = self._get_storage_node(global_idx)
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"http://{storage_node}/data/{global_idx}",
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                
+                if response.status == 200:
+                    data = await response.json()
+                    return torch.tensor(data['values'])
+                else:
+                    raise RuntimeError(f"Failed to retrieve data item {global_idx}")
+    
+    def _get_storage_node(self, global_idx: int) -> str:
+        """Determine which node stores a particular data item"""
+        # Use consistent hashing to determine storage location
+        # Simplified implementation
+        nodes = [f"node{i}" for i in range(self.total_shards)]
+        node_index = global_idx % len(nodes)
+        return nodes[node_index]
+
+class DistributedDataLoader:
+    def __init__(self, dataset: DistributedNVMeDataset, batch_size: int = 32,
+                 shuffle: bool = True, num_workers: int = 4):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.num_workers = num_workers
+        
+        self.current_idx = 0
+        self.indices = list(range(len(dataset)))
+        
+        if shuffle:
+            np.random.shuffle(self.indices)
+    
+    def __iter__(self):
+        self.current_idx = 0
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+        return self
+    
+    def __next__(self):
+        if self.current_idx >= len(self.indices):
+            raise StopIteration
+        
+        # Get batch indices
+        batch_indices = self.indices[self.current_idx:self.current_idx + self.batch_size]
+        self.current_idx += self.batch_size
+        
+        # Retrieve batch data using multiple workers
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            batch_data = loop.run_until_complete(
+                self._retrieve_batch_parallel(batch_indices)
+            )
+            return torch.stack(batch_data)
+        finally:
+            loop.close()
+    
+    async def _retrieve_batch_parallel(self, indices: List[int]) -> List[torch.Tensor]:
+        """Retrieve batch data in parallel using multiple workers"""
+        tasks = []
+        for idx in indices:
+            task = asyncio.create_task(self._retrieve_single_item(idx))
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter out exceptions
+        valid_results = []
+        for result in results:
+            if not isinstance(result, Exception):
+                valid_results.append(result)
+        
+        return valid_results
+    
+    async def _retrieve_single_item(self, idx: int) -> torch.Tensor:
+        """Retrieve a single data item"""
+        return self.dataset[idx]
+5. Cluster Management and Deployment
+5.1 Docker Configuration
+dockerfile
+# Dockerfile for compute nodes
+FROM nvidia/cuda:11.3-devel-ubuntu20.04
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.8 \
+    python3-pip \
+    build-essential \
+    linux-headers-$(uname -r) \
+    kmod \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up Python
+RUN ln -s /usr/bin/python3.8 /usr/bin/python
+RUN pip3 install --upgrade pip
+
+# Copy application
+COPY . /app
+WORKDIR /app
+
+# Install Python dependencies
+RUN pip3 install -r requirements.txt
+
+# Build kernel module
+RUN make clean && make
+
+# Load kernel module
+RUN insmod nvme_compute.ko
+
+# Expose port
+EXPOSE 8080
+
+# Start compute node
+CMD ["python3", "compute_node.py", "--node-id", "node1", "--coordinator", "coordinator:8000"]
+5.2 Kubernetes Deployment
+yaml
+# kubernetes/compute-node-deployment.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvme-compute-node
+  namespace: nvme-compute
+spec:
+  selector:
+    matchLabels:
+      app: nvme-compute-node
+  template:
+    metadata:
+      labels:
+        app: nvme-compute-node
+    spec:
+      hostNetwork: true
+      containers:
+      - name: compute-node
+        image: nvme-compute-node:latest
+        ports:
+        - containerPort: 8080
+          hostPort: 8080
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: dev
+          mountPath: /dev
+        - name: modules
+          mountPath: /lib/modules
+          readOnly: true
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: COORDINATOR_HOST
+          value: "nvme-coordinator.nvme-compute.svc.cluster.local"
+        - name: COORDINATOR_PORT
+          value: "8000"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: modules
+        hostPath:
+          path: /lib/modules
+---
+# Coordinator service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvme-coordinator
+  namespace: nvme-compute
+spec:
+  selector:
+    app: nvme-coordinator
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: LoadBalancer
+---
+# Coordinator deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvme-coordinator
+  namespace: nvme-compute
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nvme-coordinator
+  template:
+    metadata:
+      labels:
+        app: nvme-coordinator
+    spec:
+      containers:
+      - name: coordinator
+        image: nvme-coordinator:latest
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+5.3 Performance Monitoring
+python
+# cluster_monitor.py
+import asyncio
+import aiohttp
+import time
+from typing import Dict, List, Any
+import pandas as pd
+import matplotlib.pyplot as plt
+
+class ClusterMonitor:
+    def __init__(self, coordinator_url: str):
+        self.coordinator_url = coordinator_url
+        self.metrics_history = []
+    
+    async def collect_metrics(self) -> Dict[str, Any]:
+        """Collect cluster-wide metrics"""
+        async with aiohttp.ClientSession() as session:
+            # Get cluster status
+            async with session.get(f"http://{self.coordinator_url}/status") as response:
+                cluster_status = await response.json()
+            
+            # Get node details
+            async with session.get(f"http://{self.coordinator_url}/nodes") as response:
+                nodes_info = await response.json()
+            
+            # Collect individual node metrics
+            node_metrics = {}
+            for node_id, node_info in nodes_info.items():
+                if node_info['status'] == 'online':
+                    try:
+                        async with session.get(
+                            f"http://{node_info['host']}:{node_info['port']}/stats",
+                            timeout=aiohttp.ClientTimeout(total=5)
+                        ) as node_response:
+                            node_metrics[node_id] = await node_response.json()
+                    except:
+                        node_metrics[node_id] = {'status': 'unreachable'}
+            
+            metrics = {
+                'timestamp': time.time(),
+                'cluster_status': cluster_status,
+                'node_metrics': node_metrics
+            }
+            
+            self.metrics_history.append(metrics)
+            return metrics
+    
+    def generate_report(self) -> str:
+        """Generate cluster performance report"""
+        if not self.metrics_history:
+            return "No metrics collected"
+        
+        # Analyze metrics
+        df = pd.DataFrame([
+            {
+                'timestamp': m['timestamp'],
+                'nodes_online': m['cluster_status']['nodes_online'],
+                'tasks_pending': m['cluster_status']['tasks_pending'],
+                'tasks_completed': m['cluster_status']['tasks_completed'],
+                'total_compute_time': m['cluster_status']['total_compute_time']
+            }
+            for m in self.metrics_history
+        ])
+        
+        report = f"""
+Cluster Performance Report
+==========================
+Total monitoring period: {len(self.metrics_history)} samples
+Average nodes online: {df['nodes_online'].mean():.1f}
+Total tasks completed: {df['tasks_completed'].iloc[-1]}
+Total compute time: {df['total_compute_time'].iloc[-1]:.2f} seconds
+Average task throughput: {df['tasks_completed'].diff().mean():.1f} tasks/second
+"""
+        return report
+    
+    def plot_metrics(self, output_file: str = "cluster_metrics.png"):
+        """Plot cluster metrics over time"""
+        if len(self.metrics_history) < 2:
+            return
+        
+        timestamps = [m['timestamp'] - self.metrics_history[0]['timestamp'] 
+                     for m in self.metrics_history]
+        
+        plt.figure(figsize=(12, 8))
+        
+        # Plot nodes online
+        plt.subplot(2, 2, 1)
+        nodes_online = [m['cluster_status']['nodes_online'] 
+                       for m in self.metrics_history]
+        plt.plot(timestamps, nodes_online)
+        plt.title('Nodes Online')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Count')
+        
+        # Plot task throughput
+        plt.subplot(2, 2, 2)
+        tasks_completed = [m['cluster_status']['tasks_completed'] 
+                          for m in self.metrics_history]
+        throughput = [tasks_completed[i] - tasks_completed[i-1] 
+                     for i in range(1, len(tasks_completed))]
+        plt.plot(timestamps[1:], throughput)
+        plt.title('Task Throughput')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Tasks/second')
+        
+        # Plot pending tasks
+        plt.subplot(2, 2, 3)
+        pending_tasks = [m['cluster_status']['tasks_pending'] 
+                        for m in self.metrics_history]
+        plt.plot(timestamps, pending_tasks)
+        plt.title('Pending Tasks')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Count')
+        
+        plt.tight_layout()
+        plt.savefig(output_file)
+        plt.close()
+
+# Usage example
+async def monitor_cluster():
+    monitor = ClusterMonitor("localhost:8000")
+    
+    # Collect metrics for 5 minutes
+    for _ in range(300):  # 5 minutes at 1 sample per second
+        await monitor.collect_metrics()
+        await asyncio.sleep(1)
+    
+    print(monitor.generate_report())
+    monitor.plot_metrics()
+This distributed architecture allows you to:
+
+Scale Horizontally: Add more compute nodes with NVMe drives to increase total computational power
+
+Load Balance: Distribute tasks efficiently across the cluster using consistent hashing
+
+Fault Tolerance: Continue operation even if some nodes fail
+
+Model Parallelism: Split large models across multiple nodes
+
+Data Parallelism: Distribute datasets across nodes for parallel processing
+
+Resource Optimization: Utilize NVMe storage for both data and computation across the cluster
+
+The system provides a foundation for building massively scalable machine learning infrastructure that leverages the unique capabilities of NVMe computational storage across entire data centers.
+
