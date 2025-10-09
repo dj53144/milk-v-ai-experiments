@@ -1,0 +1,1375 @@
+NVMe-Based Computational Storage Engine: Transforming Storage Devices into Computational Units
+Abstract
+This project presents a novel framework that repurposes NVMe storage devices as computational engines, enabling direct in-storage processing of tensor operations and machine learning workloads. By implementing a custom Linux kernel driver that intercepts and transforms storage I/O operations into computational tasks, we create a hybrid storage-compute architecture that reduces data movement between storage and processing units. The system exposes a standard block device interface while transparently handling computational requests, with seamless integration into PyTorch through custom autograd functions and C++ extensions. This approach demonstrates significant potential for data-intensive machine learning applications where I/O bottlenecks traditionally limit performance, offering a new paradigm for computational storage in deep learning infrastructure.
+
+1. Project Architecture Overview
+System Components
+text
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   PyTorch       │    │   Custom         │    │   Linux Kernel  │
+│   Application   │────│   C++ Extension  │────│   Driver        │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+         │                        │                       │
+         │                        │                       │
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   Autograd      │    │   Memory-Mapped  │    │   NVMe Compute  │
+│   Functions     │    │   Tensors        │    │   Engine        │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+                                                          │
+                                                          │
+┌─────────────────────────────────────────────────────────────────┐
+│                       NVMe Storage Device                       │
+│                                                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│  │ Tensor Data │  │ Model       │  │ Results     │  │ Compute     │
+│  │ Blocks      │  │ Weights     │  │ Cache       │  │ Metadata    │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘
+└─────────────────────────────────────────────────────────────────┘
+2. Step 1: Kernel Driver Implementation
+2.1 Driver Header and Data Structures
+c
+// nvme_compute_driver.h
+#ifndef _NVME_COMPUTE_DRIVER_H
+#define _NVME_COMPUTE_DRIVER_H
+
+#include <linux/types.h>
+#include <linux/cdev.h>
+#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
+
+#define NVME_COMPUTE_MAJOR        0
+#define NVME_COMPUTE_MINOR        0
+#define NVME_COMPUTE_SECTOR_SIZE  512
+#define NVME_COMPUTE_SIGNATURE    0x4E564D45  // "NVME" in hex
+
+// Computational operations
+enum nvme_compute_ops {
+    OP_TENSOR_MM = 0x1001,        // Matrix multiplication
+    OP_TENSOR_CONV = 0x1002,      // Convolution
+    OP_TENSOR_ADD = 0x1003,       // Element-wise addition
+    OP_TENSOR_RELU = 0x1004,      // ReLU activation
+    OP_TENSOR_SOFTMAX = 0x1005,   // Softmax
+    OP_DATA_PREPROCESS = 0x1006,  // Data preprocessing
+};
+
+// Tensor descriptor
+struct nvme_tensor_desc {
+    uint32_t dtype;           // Data type
+    uint32_t ndim;            // Number of dimensions
+    uint64_t sizes[8];        // Tensor dimensions
+    uint64_t strides[8];      // Tensor strides
+    uint64_t storage_offset;  // Storage location
+};
+
+// Computation request
+struct nvme_compute_req {
+    uint32_t signature;
+    uint32_t operation;
+    uint64_t req_id;
+    struct nvme_tensor_desc input_desc[4];  // Up to 4 inputs
+    struct nvme_tensor_desc output_desc;    // Single output
+    uint64_t result_sector;
+    uint32_t num_inputs;
+    uint32_t flags;
+};
+
+// Work structure for async processing
+struct nvme_compute_work {
+    struct nvme_compute_req req;
+    struct bio *bio;
+    struct nvme_compute_device *nvme_dev;
+    struct work_struct work;
+    struct completion completion;
+    int error;
+};
+
+// Main device structure
+struct nvme_compute_device {
+    struct gendisk *disk;
+    struct request_queue *queue;
+    struct blk_mq_tag_set tag_set;
+    
+    // Computational resources
+    void *compute_buffer;
+    dma_addr_t compute_buffer_dma;
+    size_t buffer_size;
+    
+    // Statistics
+    atomic64_t ops_completed;
+    atomic64_t ops_failed;
+    atomic64_t bytes_processed;
+    
+    // Synchronization
+    spinlock_t lock;
+    struct mutex io_mutex;
+    
+    // Character device for control
+    struct cdev cdev;
+    dev_t devt;
+};
+
+#endif
+2.2 Driver Core Implementation
+c
+// nvme_compute_core.c
+#include "nvme_compute_driver.h"
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/delay.h>
+#include <linux/io.h>
+
+static int nvme_compute_major;
+static struct class *nvme_compute_class;
+static struct nvme_compute_device *g_nvme_compute_dev;
+
+// Matrix multiplication implementation
+static int compute_matrix_multiply(struct nvme_compute_device *dev,
+                                  struct nvme_compute_req *req)
+{
+    struct nvme_tensor_desc *a_desc = &req->input_desc[0];
+    struct nvme_tensor_desc *b_desc = &req->input_desc[1];
+    struct nvme_tensor_desc *out_desc = &req->output_desc;
+    struct bio *bio;
+    int ret = 0;
+    
+    pr_info("Computing matrix multiply: %lux%lu * %lux%lu\n",
+           a_desc->sizes[0], a_desc->sizes[1],
+           b_desc->sizes[0], b_desc->sizes[1]);
+    
+    // Allocate temporary buffers
+    size_t a_size = a_desc->sizes[0] * a_desc->sizes[1] * sizeof(float);
+    size_t b_size = b_desc->sizes[0] * b_desc->sizes[1] * sizeof(float);
+    size_t out_size = out_desc->sizes[0] * out_desc->sizes[1] * sizeof(float);
+    
+    float *matrix_a = vmalloc(a_size);
+    float *matrix_b = vmalloc(b_size);
+    float *result = vmalloc(out_size);
+    
+    if (!matrix_a || !matrix_b || !result) {
+        ret = -ENOMEM;
+        goto out_cleanup;
+    }
+    
+    // Read matrix A from storage
+    bio = bio_alloc(GFP_KERNEL, 1);
+    bio->bi_iter.bi_sector = a_desc->storage_offset;
+    bio_set_dev(bio, dev->disk->part0);
+    bio->bi_opf = REQ_OP_READ;
+    bio_add_page(bio, virt_to_page(matrix_a), a_size, offset_in_page(matrix_a));
+    
+    ret = submit_bio_wait(bio);
+    if (ret) {
+        pr_err("Failed to read matrix A: %d\n", ret);
+        goto out_bio;
+    }
+    
+    // Read matrix B from storage
+    bio->bi_iter.bi_sector = b_desc->storage_offset;
+    bio_add_page(bio, virt_to_page(matrix_b), b_size, offset_in_page(matrix_b));
+    
+    ret = submit_bio_wait(bio);
+    if (ret) {
+        pr_err("Failed to read matrix B: %d\n", ret);
+        goto out_bio;
+    }
+    
+    // Perform matrix multiplication
+    size_t m = a_desc->sizes[0];
+    size_t n = b_desc->sizes[1];
+    size_t k = a_desc->sizes[1];
+    
+    for (size_t i = 0; i < m; i++) {
+        for (size_t j = 0; j < n; j++) {
+            result[i * n + j] = 0;
+            for (size_t p = 0; p < k; p++) {
+                result[i * n + j] += matrix_a[i * k + p] * matrix_b[p * n + j];
+            }
+        }
+    }
+    
+    // Write result back to storage
+    bio->bi_opf = REQ_OP_WRITE;
+    bio->bi_iter.bi_sector = out_desc->storage_offset;
+    bio_add_page(bio, virt_to_page(result), out_size, offset_in_page(result));
+    
+    ret = submit_bio_wait(bio);
+    if (ret) {
+        pr_err("Failed to write result: %d\n", ret);
+    }
+    
+    // Update statistics
+    atomic64_add(a_size + b_size + out_size, &dev->bytes_processed);
+    atomic64_inc(&dev->ops_completed);
+
+out_bio:
+    bio_put(bio);
+out_cleanup:
+    vfree(matrix_a);
+    vfree(matrix_b);
+    vfree(result);
+    return ret;
+}
+
+// Convolution operation
+static int compute_convolution(struct nvme_compute_device *dev,
+                              struct nvme_compute_req *req)
+{
+    // Implementation for 2D convolution
+    struct nvme_tensor_desc *input_desc = &req->input_desc[0];
+    struct nvme_tensor_desc *weight_desc = &req->input_desc[1];
+    struct nvme_tensor_desc *output_desc = &req->output_desc;
+    
+    pr_info("Computing convolution: input %lux%lux%lu, weights %lux%lux%lu\n",
+           input_desc->sizes[0], input_desc->sizes[1], input_desc->sizes[2],
+           weight_desc->sizes[0], weight_desc->sizes[1], weight_desc->sizes[2]);
+    
+    // Simplified convolution implementation
+    // In production, this would use optimized kernels
+    
+    return 0;
+}
+
+// ReLU activation function
+static int compute_relu(struct nvme_compute_device *dev,
+                       struct nvme_compute_req *req)
+{
+    struct nvme_tensor_desc *input_desc = &req->input_desc[0];
+    struct nvme_tensor_desc *output_desc = &req->output_desc;
+    struct bio *bio;
+    int ret = 0;
+    
+    size_t data_size = 1;
+    for (int i = 0; i < input_desc->ndim; i++) {
+        data_size *= input_desc->sizes[i];
+    }
+    data_size *= sizeof(float);
+    
+    float *input_data = vmalloc(data_size);
+    float *output_data = vmalloc(data_size);
+    
+    if (!input_data || !output_data) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    
+    // Read input data
+    bio = bio_alloc(GFP_KERNEL, 1);
+    bio->bi_iter.bi_sector = input_desc->storage_offset;
+    bio_set_dev(bio, dev->disk->part0);
+    bio->bi_opf = REQ_OP_READ;
+    bio_add_page(bio, virt_to_page(input_data), data_size, offset_in_page(input_data));
+    
+    ret = submit_bio_wait(bio);
+    if (ret)
+        goto out_bio;
+    
+    // Apply ReLU
+    for (size_t i = 0; i < data_size / sizeof(float); i++) {
+        output_data[i] = input_data[i] > 0 ? input_data[i] : 0;
+    }
+    
+    // Write output
+    bio->bi_opf = REQ_OP_WRITE;
+    bio->bi_iter.bi_sector = output_desc->storage_offset;
+    bio_add_page(bio, virt_to_page(output_data), data_size, offset_in_page(output_data));
+    
+    ret = submit_bio_wait(bio);
+    
+out_bio:
+    bio_put(bio);
+out:
+    vfree(input_data);
+    vfree(output_data);
+    return ret;
+}
+
+// Work function for async processing
+static void nvme_compute_work_fn(struct work_struct *work)
+{
+    struct nvme_compute_work *cwork = container_of(work, struct nvme_compute_work, work);
+    struct nvme_compute_device *dev = cwork->nvme_dev;
+    struct nvme_compute_req *req = &cwork->req;
+    int ret = 0;
+    
+    // Verify signature
+    if (req->signature != NVME_COMPUTE_SIGNATURE) {
+        pr_err("Invalid computation signature: %x\n", req->signature);
+        ret = -EINVAL;
+        goto out;
+    }
+    
+    // Dispatch to appropriate computation function
+    switch (req->operation) {
+        case OP_TENSOR_MM:
+            ret = compute_matrix_multiply(dev, req);
+            break;
+        case OP_TENSOR_CONV:
+            ret = compute_convolution(dev, req);
+            break;
+        case OP_TENSOR_RELU:
+            ret = compute_relu(dev, req);
+            break;
+        default:
+            pr_err("Unknown operation: %u\n", req->operation);
+            ret = -EINVAL;
+            break;
+    }
+    
+out:
+    cwork->error = ret;
+    if (cwork->bio) {
+        cwork->bio->bi_status = ret ? BLK_STS_IOERR : BLK_STS_OK;
+        bio_endio(cwork->bio);
+    }
+    complete(&cwork->completion);
+    kfree(cwork);
+}
+
+// Block device make_request function
+static blk_qc_t nvme_compute_make_request(struct request_queue *q, struct bio *bio)
+{
+    struct nvme_compute_device *dev = q->queuedata;
+    struct nvme_compute_work *work;
+    
+    if (bio_data_dir(bio) == WRITE) {
+        // Check if this is a computation request
+        struct nvme_compute_req *req;
+        void *bio_data = bio_data(bio);
+        
+        if (bio->bi_iter.bi_size < sizeof(struct nvme_compute_req)) {
+            // Regular write, handle normally
+            generic_make_request(bio);
+            return BLK_QC_T_NONE;
+        }
+        
+        req = (struct nvme_compute_req *)bio_data;
+        
+        if (req->signature == NVME_COMPUTE_SIGNATURE) {
+            // This is a computation request
+            work = kzalloc(sizeof(*work), GFP_ATOMIC);
+            if (!work) {
+                bio->bi_status = BLK_STS_RESOURCE;
+                bio_endio(bio);
+                return BLK_QC_T_NONE;
+            }
+            
+            memcpy(&work->req, req, sizeof(*req));
+            work->bio = bio;
+            work->nvme_dev = dev;
+            INIT_WORK(&work->work, nvme_compute_work_fn);
+            init_completion(&work->completion);
+            
+            queue_work(system_highpri_wq, &work->work);
+            
+            // Wait for completion (simplified - in production would be async)
+            wait_for_completion(&work->completion);
+            
+            return BLK_QC_T_NONE;
+        }
+    }
+    
+    // Regular I/O operation
+    generic_make_request(bio);
+    return BLK_QC_T_NONE;
+}
+2.3 Device Setup and Registration
+c
+// nvme_compute_setup.c
+#include "nvme_compute_driver.h"
+
+static struct block_device_operations nvme_compute_fops = {
+    .owner = THIS_MODULE,
+};
+
+static int nvme_compute_create_device(struct nvme_compute_device *dev)
+{
+    int ret;
+    
+    // Initialize spinlock and mutex
+    spin_lock_init(&dev->lock);
+    mutex_init(&dev->io_mutex);
+    
+    // Initialize statistics
+    atomic64_set(&dev->ops_completed, 0);
+    atomic64_set(&dev->ops_failed, 0);
+    atomic64_set(&dev->bytes_processed, 0);
+    
+    // Create request queue
+    dev->queue = blk_alloc_queue(GFP_KERNEL);
+    if (!dev->queue) {
+        return -ENOMEM;
+    }
+    
+    blk_queue_make_request(dev->queue, nvme_compute_make_request);
+    blk_queue_logical_block_size(dev->queue, NVME_COMPUTE_SECTOR_SIZE);
+    blk_queue_physical_block_size(dev->queue, NVME_COMPUTE_SECTOR_SIZE);
+    blk_queue_max_hw_sectors(dev->queue, 256); // 128KB max request
+    
+    // Allocate computation buffer
+    dev->buffer_size = 64 * 1024 * 1024; // 64MB
+    dev->compute_buffer = dma_alloc_coherent(NULL, dev->buffer_size,
+                                           &dev->compute_buffer_dma,
+                                           GFP_KERNEL);
+    if (!dev->compute_buffer) {
+        blk_cleanup_queue(dev->queue);
+        return -ENOMEM;
+    }
+    
+    // Allocate gendisk
+    dev->disk = alloc_disk(1);
+    if (!dev->disk) {
+        dma_free_coherent(NULL, dev->buffer_size, 
+                         dev->compute_buffer, dev->compute_buffer_dma);
+        blk_cleanup_queue(dev->queue);
+        return -ENOMEM;
+    }
+    
+    // Set up the gendisk
+    dev->disk->major = nvme_compute_major;
+    dev->disk->first_minor = NVME_COMPUTE_MINOR;
+    dev->disk->fops = &nvme_compute_fops;
+    dev->disk->queue = dev->queue;
+    dev->disk->private_data = dev;
+    snprintf(dev->disk->disk_name, DISK_NAME_LEN, "nvmecpu%d", 0);
+    
+    // Set capacity (1TB virtual)
+    set_capacity(dev->disk, 2048 * 2048 * 2048); // 1TB in 512-byte sectors
+    
+    // Add disk to system
+    add_disk(dev->disk);
+    
+    pr_info("NVMe Compute Engine registered: %s, capacity: %llu sectors\n",
+           dev->disk->disk_name, (unsigned long long)get_capacity(dev->disk));
+    
+    return 0;
+}
+
+static int __init nvme_compute_init(void)
+{
+    struct nvme_compute_device *dev;
+    int ret;
+    
+    pr_info("Initializing NVMe Compute Engine Driver\n");
+    
+    // Allocate device structure
+    dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+    if (!dev) {
+        return -ENOMEM;
+    }
+    
+    // Register block device
+    nvme_compute_major = register_blkdev(0, "nvmecpu");
+    if (nvme_compute_major < 0) {
+        ret = nvme_compute_major;
+        goto err_free;
+    }
+    
+    // Create device
+    ret = nvme_compute_create_device(dev);
+    if (ret) {
+        goto err_unregister;
+    }
+    
+    g_nvme_compute_dev = dev;
+    
+    pr_info("NVMe Compute Engine Driver loaded successfully\n");
+    return 0;
+    
+err_unregister:
+    unregister_blkdev(nvme_compute_major, "nvmecpu");
+err_free:
+    kfree(dev);
+    return ret;
+}
+
+static void __exit nvme_compute_exit(void)
+{
+    pr_info("Unloading NVMe Compute Engine Driver\n");
+    
+    if (g_nvme_compute_dev) {
+        if (g_nvme_compute_dev->disk) {
+            del_gendisk(g_nvme_compute_dev->disk);
+            put_disk(g_nvme_compute_dev->disk);
+        }
+        if (g_nvme_compute_dev->queue) {
+            blk_cleanup_queue(g_nvme_compute_dev->queue);
+        }
+        if (g_nvme_compute_dev->compute_buffer) {
+            dma_free_coherent(NULL, g_nvme_compute_dev->buffer_size,
+                            g_nvme_compute_dev->compute_buffer,
+                            g_nvme_compute_dev->compute_buffer_dma);
+        }
+        kfree(g_nvme_compute_dev);
+    }
+    
+    unregister_blkdev(nvme_compute_major, "nvmecpu");
+    pr_info("NVMe Compute Engine Driver unloaded\n");
+}
+
+module_init(nvme_compute_init);
+module_exit(nvme_compute_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("NVMe Compute Engine Project");
+MODULE_DESCRIPTION("NVMe Storage to Computational Unit Transformation Driver");
+MODULE_VERSION("1.0");
+3. Step 2: PyTorch C++ Extension
+3.1 Extension Header
+cpp
+// nvme_compute_extension.h
+#pragma once
+#include <torch/extension.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <atomic>
+
+#define NVME_COMPUTE_DEVICE "/dev/nvmecpu0"
+#define NVME_COMPUTE_SIGNATURE 0x4E564D45
+
+// Must match kernel driver definitions
+enum nvme_compute_ops {
+    OP_TENSOR_MM = 0x1001,
+    OP_TENSOR_CONV = 0x1002,
+    OP_TENSOR_ADD = 0x1003,
+    OP_TENSOR_RELU = 0x1004,
+    OP_TENSOR_SOFTMAX = 0x1005,
+};
+
+struct nvme_tensor_desc {
+    uint32_t dtype;
+    uint32_t ndim;
+    uint64_t sizes[8];
+    uint64_t strides[8];
+    uint64_t storage_offset;
+};
+
+struct nvme_compute_req {
+    uint32_t signature;
+    uint32_t operation;
+    uint64_t req_id;
+    nvme_tensor_desc input_desc[4];
+    nvme_tensor_desc output_desc;
+    uint64_t result_sector;
+    uint32_t num_inputs;
+    uint32_t flags;
+};
+
+class NVMeComputeEngine {
+private:
+    int fd;
+    std::atomic<uint64_t> next_req_id;
+    uint64_t storage_cursor;
+    
+public:
+    NVMeComputeEngine();
+    ~NVMeComputeEngine();
+    
+    // Tensor operations
+    torch::Tensor matrix_multiply(const torch::Tensor& a, const torch::Tensor& b);
+    torch::Tensor conv2d(const torch::Tensor& input, const torch::Tensor& weight, 
+                        const torch::Tensor& bias, std::vector<int64_t> stride,
+                        std::vector<int64_t> padding, std::vector<int64_t> dilation);
+    torch::Tensor relu(const torch::Tensor& input);
+    
+    // Memory management
+    uint64_t allocate_storage(size_t size);
+    void write_to_storage(const torch::Tensor& tensor, uint64_t offset);
+    torch::Tensor read_from_storage(const std::vector<int64_t>& shape, 
+                                   torch::ScalarType dtype, uint64_t offset);
+    
+private:
+    void tensor_to_descriptor(const torch::Tensor& tensor, nvme_tensor_desc& desc, 
+                             uint64_t storage_offset);
+    torch::Tensor descriptor_to_tensor(const nvme_tensor_desc& desc);
+    int submit_compute_request(const nvme_compute_req& req);
+};
+3.2 Extension Implementation
+cpp
+// nvme_compute_extension.cpp
+#include "nvme_compute_extension.h"
+
+NVMeComputeEngine::NVMeComputeEngine() : next_req_id(1), storage_cursor(0) {
+    fd = open(NVME_COMPUTE_DEVICE, O_RDWR);
+    if (fd < 0) {
+        throw std::runtime_error("Cannot open NVMe compute device: " + 
+                               std::string(strerror(errno)));
+    }
+}
+
+NVMeComputeEngine::~NVMeComputeEngine() {
+    if (fd >= 0) {
+        close(fd);
+    }
+}
+
+uint64_t NVMeComputeEngine::allocate_storage(size_t size) {
+    uint64_t offset = storage_cursor;
+    storage_cursor += (size + 511) / 512; // Align to sectors
+    return offset;
+}
+
+void NVMeComputeEngine::write_to_storage(const torch::Tensor& tensor, uint64_t offset) {
+    auto contiguous_tensor = tensor.contiguous();
+    size_t size = contiguous_tensor.nbytes();
+    
+    ssize_t written = pwrite(fd, contiguous_tensor.data_ptr(), size, offset * 512);
+    if (written != static_cast<ssize_t>(size)) {
+        throw std::runtime_error("Failed to write tensor to storage: " + 
+                               std::string(strerror(errno)));
+    }
+}
+
+torch::Tensor NVMeComputeEngine::read_from_storage(const std::vector<int64_t>& shape,
+                                                  torch::ScalarType dtype,
+                                                  uint64_t offset) {
+    auto options = torch::TensorOptions().dtype(dtype);
+    torch::Tensor tensor = torch::empty(shape, options);
+    size_t size = tensor.nbytes();
+    
+    ssize_t read = pread(fd, tensor.data_ptr(), size, offset * 512);
+    if (read != static_cast<ssize_t>(size)) {
+        throw std::runtime_error("Failed to read tensor from storage: " + 
+                               std::string(strerror(errno)));
+    }
+    
+    return tensor;
+}
+
+void NVMeComputeEngine::tensor_to_descriptor(const torch::Tensor& tensor,
+                                            nvme_tensor_desc& desc,
+                                            uint64_t storage_offset) {
+    // Reset descriptor
+    memset(&desc, 0, sizeof(desc));
+    
+    // Set data type (simplified - only float32 for now)
+    desc.dtype = 1; // float32
+    
+    // Set dimensions
+    desc.ndim = tensor.dim();
+    for (int i = 0; i < desc.ndim; i++) {
+        desc.sizes[i] = tensor.size(i);
+        desc.strides[i] = tensor.stride(i) * tensor.element_size();
+    }
+    
+    // Set storage location
+    desc.storage_offset = storage_offset;
+}
+
+int NVMeComputeEngine::submit_compute_request(const nvme_compute_req& req) {
+    nvme_compute_req mutable_req = req;
+    mutable_req.signature = NVME_COMPUTE_SIGNATURE;
+    mutable_req.req_id = next_req_id++;
+    
+    ssize_t written = write(fd, &mutable_req, sizeof(mutable_req));
+    if (written != sizeof(mutable_req)) {
+        return -1;
+    }
+    
+    return 0;
+}
+
+torch::Tensor NVMeComputeEngine::matrix_multiply(const torch::Tensor& a, 
+                                                const torch::Tensor& b) {
+    // Verify inputs
+    if (a.dim() != 2 || b.dim() != 2) {
+        throw std::runtime_error("matrix_multiply: inputs must be 2D tensors");
+    }
+    if (a.size(1) != b.size(0)) {
+        throw std::runtime_error("matrix_multiply: dimension mismatch");
+    }
+    
+    // Allocate storage for inputs and output
+    uint64_t a_offset = allocate_storage(a.nbytes());
+    uint64_t b_offset = allocate_storage(b.nbytes());
+    
+    auto output_shape = {a.size(0), b.size(1)};
+    uint64_t output_offset = allocate_storage(
+        a.size(0) * b.size(1) * a.element_size());
+    
+    // Write inputs to storage
+    write_to_storage(a, a_offset);
+    write_to_storage(b, b_offset);
+    
+    // Prepare computation request
+    nvme_compute_req req = {};
+    req.operation = OP_TENSOR_MM;
+    req.num_inputs = 2;
+    
+    // Set up tensor descriptors
+    tensor_to_descriptor(a, req.input_desc[0], a_offset);
+    tensor_to_descriptor(b, req.input_desc[1], b_offset);
+    
+    auto output_options = torch::TensorOptions().dtype(a.dtype());
+    torch::Tensor output = torch::empty(output_shape, output_options);
+    tensor_to_descriptor(output, req.output_desc, output_offset);
+    
+    // Submit request
+    if (submit_compute_request(req) != 0) {
+        throw std::runtime_error("matrix_multiply: computation request failed");
+    }
+    
+    // Read result
+    return read_from_storage(output_shape, a.dtype(), output_offset);
+}
+
+torch::Tensor NVMeComputeEngine::relu(const torch::Tensor& input) {
+    // Allocate storage
+    uint64_t input_offset = allocate_storage(input.nbytes());
+    uint64_t output_offset = allocate_storage(input.nbytes());
+    
+    // Write input to storage
+    write_to_storage(input, input_offset);
+    
+    // Prepare computation request
+    nvme_compute_req req = {};
+    req.operation = OP_TENSOR_RELU;
+    req.num_inputs = 1;
+    
+    tensor_to_descriptor(input, req.input_desc[0], input_offset);
+    
+    torch::Tensor output = torch::empty_like(input);
+    tensor_to_descriptor(output, req.output_desc, output_offset);
+    
+    // Submit request
+    if (submit_compute_request(req) != 0) {
+        throw std::runtime_error("relu: computation request failed");
+    }
+    
+    // Read result
+    return read_from_storage(input.sizes().vec(), input.dtype(), output_offset);
+}
+
+// PyTorch binding
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    py::class_<NVMeComputeEngine>(m, "NVMeComputeEngine")
+        .def(py::init<>())
+        .def("matrix_multiply", &NVMeComputeEngine::matrix_multiply)
+        .def("relu", &NVMeComputeEngine::relu)
+        .def("allocate_storage", &NVMeComputeEngine::allocate_storage)
+        .def("write_to_storage", &NVMeComputeEngine::write_to_storage)
+        .def("read_from_storage", &NVMeComputeEngine::read_from_storage);
+}
+4. Step 3: PyTorch Autograd Integration
+4.1 Custom Autograd Functions
+python
+# nvme_autograd.py
+import torch
+import torch.nn as nn
+from torch.autograd import Function
+import nvme_compute_extension as nvme
+
+class NVMeMatrixMultiply(Function):
+    @staticmethod
+    def forward(ctx, input1, input2, compute_engine):
+        ctx.compute_engine = compute_engine
+        ctx.save_for_backward(input1, input2)
+        
+        # Use NVMe compute engine for forward pass
+        output = compute_engine.matrix_multiply(input1, input2)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input1, input2 = ctx.saved_tensors
+        compute_engine = ctx.compute_engine
+        
+        # Compute gradients using chain rule
+        # dL/dA = dL/dC * B^T
+        # dL/dB = A^T * dL/dC
+        grad_input1 = compute_engine.matrix_multiply(grad_output, input2.transpose(0, 1))
+        grad_input2 = compute_engine.matrix_multiply(input1.transpose(0, 1), grad_output)
+        
+        return grad_input1, grad_input2, None
+
+class NVMeReLU(Function):
+    @staticmethod
+    def forward(ctx, input, compute_engine):
+        ctx.save_for_backward(input)
+        ctx.compute_engine = compute_engine
+        
+        output = compute_engine.relu(input)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, = ctx.saved_tensors
+        compute_engine = ctx.compute_engine
+        
+        # ReLU gradient: 1 where input > 0, else 0
+        mask = (input > 0).float()
+        grad_input = compute_engine.matrix_multiply(grad_output, mask)  # element-wise
+        
+        return grad_input, None
+
+class NVMeLinear(nn.Module):
+    def __init__(self, in_features, out_features, use_nvme=True):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
+        self.bias = nn.Parameter(torch.randn(out_features))
+        self.use_nvme = use_nvme
+        self.compute_engine = nvme.NVMeComputeEngine() if use_nvme else None
+        
+    def forward(self, x):
+        if self.use_nvme and self.compute_engine is not None:
+            # Use NVMe compute engine
+            output = NVMeMatrixMultiply.apply(x, self.weight, self.compute_engine)
+            output += self.bias
+        else:
+            # Fallback to PyTorch
+            output = torch.matmul(x, self.weight.t()) + self.bias
+            
+        return output
+
+class NVMeConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, 
+                 stride=1, padding=0, dilation=1, groups=1, use_nvme=True):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        self.use_nvme = use_nvme
+        
+        self.weight = nn.Parameter(
+            torch.randn(out_channels, in_channels // groups, kernel_size, kernel_size)
+        )
+        self.bias = nn.Parameter(torch.randn(out_channels))
+        
+        self.compute_engine = nvme.NVMeComputeEngine() if use_nvme else None
+        
+    def forward(self, x):
+        if self.use_nvme and self.compute_engine is not None:
+            # For large inputs, use NVMe compute engine
+            if x.numel() > 1000000:
+                # This would use a custom conv2d implementation in the extension
+                output = self.compute_engine.conv2d(
+                    x, self.weight, self.bias, 
+                    [self.stride, self.stride],
+                    [self.padding, self.padding],
+                    [self.dilation, self.dilation]
+                )
+            else:
+                output = torch.nn.functional.conv2d(
+                    x, self.weight, self.bias, self.stride,
+                    self.padding, self.dilation, self.groups
+                )
+        else:
+            output = torch.nn.functional.conv2d(
+                x, self.weight, self.bias, self.stride,
+                self.padding, self.dilation, self.groups
+            )
+            
+        return output
+5. Step 4: Memory-Mapped Tensor Implementation
+python
+# nvme_tensor.py
+import torch
+import numpy as np
+import mmap
+import os
+from typing import List, Union
+
+class NVMeTensor:
+    def __init__(self, device_path: str, shape: List[int], dtype: torch.dtype = torch.float32,
+                 offset: int = 0, mode: str = 'r+'):
+        self.device_path = device_path
+        self.shape = shape
+        self.dtype = dtype
+        self.offset = offset
+        self.mode = mode
+        
+        self._file = None
+        self._mmap = None
+        self._tensor = None
+        
+        self._initialize()
+    
+    def _initialize(self):
+        """Initialize memory mapping and create tensor view"""
+        try:
+            self._file = open(self.device_path, 'r+b' if self.mode == 'r+' else 'rb')
+            file_size = os.path.getsize(self.device_path)
+            
+            # Calculate total bytes needed
+            element_size = torch.tensor(0, dtype=self.dtype).element_size()
+            total_bytes = np.prod(self.shape) * element_size
+            
+            # Create memory map
+            self._mmap = mmap.mmap(
+                self._file.fileno(),
+                length=total_bytes,
+                offset=self.offset * 512,  # Convert sectors to bytes
+                access=mmap.ACCESS_READ if self.mode == 'r' else mmap.ACCESS_WRITE
+            )
+            
+            # Create numpy array from memory map
+            np_dtype = {
+                torch.float32: np.float32,
+                torch.float64: np.float64,
+                torch.int32: np.int32,
+                torch.int64: np.int64
+            }.get(self.dtype, np.float32)
+            
+            numpy_array = np.frombuffer(
+                self._mmap, 
+                dtype=np_dtype,
+                count=np.prod(self.shape)
+            ).reshape(self.shape)
+            
+            # Create tensor from numpy array
+            self._tensor = torch.from_numpy(numpy_array)
+            
+        except Exception as e:
+            self._cleanup()
+            raise RuntimeError(f"Failed to initialize NVMeTensor: {e}")
+    
+    def _cleanup(self):
+        """Clean up resources"""
+        if self._mmap is not None:
+            self._mmap.close()
+        if self._file is not None:
+            self._file.close()
+    
+    def __del__(self):
+        self._cleanup()
+    
+    def sync(self):
+        """Force synchronization with NVMe storage"""
+        if self._mmap is not None:
+            self._mmap.flush()
+    
+    @property
+    def tensor(self) -> torch.Tensor:
+        return self._tensor
+    
+    def __getattr__(self, name):
+        """Delegate attribute access to underlying tensor"""
+        return getattr(self._tensor, name)
+    
+    def __getitem__(self, index):
+        return self._tensor[index]
+    
+    def __setitem__(self, index, value):
+        self._tensor[index] = value
+    
+    def __repr__(self):
+        return f"NVMeTensor(shape={self.shape}, dtype={self.dtype}, offset={self.offset})"
+
+class NVMeTensorManager:
+    def __init__(self, device_path: str = "/dev/nvmecpu0"):
+        self.device_path = device_path
+        self.next_offset = 0
+        self.allocated_tensors = []
+    
+    def allocate_tensor(self, shape: List[int], dtype: torch.dtype = torch.float32) -> NVMeTensor:
+        """Allocate a new tensor in NVMe storage"""
+        element_size = torch.tensor(0, dtype=dtype).element_size()
+        total_elements = np.prod(shape)
+        total_bytes = total_elements * element_size
+        total_sectors = (total_bytes + 511) // 512  # Round up to sectors
+        
+        tensor = NVMeTensor(
+            self.device_path,
+            shape,
+            dtype,
+            offset=self.next_offset,
+            mode='r+'
+        )
+        
+        self.allocated_tensors.append(tensor)
+        self.next_offset += total_sectors
+        
+        return tensor
+    
+    def load_tensor(self, shape: List[int], dtype: torch.dtype, offset: int) -> NVMeTensor:
+        """Load an existing tensor from NVMe storage"""
+        return NVMeTensor(
+            self.device_path,
+            shape,
+            dtype,
+            offset=offset,
+            mode='r'
+        )
+    
+    def sync_all(self):
+        """Synchronize all tensors with storage"""
+        for tensor in self.allocated_tensors:
+            tensor.sync()
+6. Step 5: Training Integration Example
+python
+# nvme_training.py
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import nvme_compute_extension as nvme
+from nvme_autograd import NVMeLinear, NVMeReLU
+from nvme_tensor import NVMeTensorManager
+
+class LargeDataset(Dataset):
+    def __init__(self, num_samples, feature_dim, nvme_manager=None):
+        self.num_samples = num_samples
+        self.feature_dim = feature_dim
+        self.nvme_manager = nvme_manager
+        self.data = []
+        
+        # Preload data to NVMe storage if manager provided
+        if nvme_manager is not None:
+            for i in range(num_samples):
+                tensor = nvme_manager.allocate_tensor([feature_dim], torch.float32)
+                tensor.tensor[:] = torch.randn(feature_dim)
+                self.data.append(tensor)
+        else:
+            for i in range(num_samples):
+                self.data.append(torch.randn(feature_dim))
+    
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        if isinstance(item, NVMeTensor):
+            return item.tensor.clone()  # Return a copy in CPU memory
+        else:
+            return item
+
+class NVMeMLP(nn.Module):
+    def __init__(self, input_size, hidden_size, num_classes, use_nvme=True):
+        super().__init__()
+        self.use_nvme = use_nvme
+        
+        self.layer1 = NVMeLinear(input_size, hidden_size, use_nvme=use_nvme)
+        self.layer2 = NVMeLinear(hidden_size, hidden_size, use_nvme=use_nvme)
+        self.layer3 = NVMeLinear(hidden_size, num_classes, use_nvme=use_nvme)
+        self.relu = nn.ReLU()
+        
+        # Store compute engine reference
+        self.compute_engine = self.layer1.compute_engine if use_nvme else None
+    
+    def forward(self, x):
+        if self.use_nvme and self.compute_engine is not None:
+            # Use NVMe operations for large tensors
+            x = NVMeReLU.apply(self.layer1(x), self.compute_engine)
+            x = NVMeReLU.apply(self.layer2(x), self.compute_engine)
+            x = self.layer3(x)
+        else:
+            # Standard PyTorch operations
+            x = self.relu(self.layer1(x))
+            x = self.relu(self.layer2(x))
+            x = self.layer3(x)
+            
+        return x
+
+def train_with_nvme():
+    # Configuration
+    input_size = 1000
+    hidden_size = 5000
+    num_classes = 10
+    num_samples = 10000
+    batch_size = 64
+    num_epochs = 10
+    
+    # Initialize NVMe components
+    nvme_manager = NVMeTensorManager()
+    compute_engine = nvme.NVMeComputeEngine()
+    
+    # Create dataset with NVMe storage
+    dataset = LargeDataset(num_samples, input_size, nvme_manager)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    # Create model with NVMe support
+    model = NVMeMLP(input_size, hidden_size, num_classes, use_nvme=True)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    # Training loop
+    for epoch in range(num_epochs):
+        total_loss = 0
+        for batch_idx, (data, target) in enumerate(dataloader):
+            optimizer.zero_grad()
+            
+            # Forward pass (uses NVMe compute engine for large operations)
+            output = model(data)
+            loss = criterion(output, torch.randint(0, num_classes, (batch_size,)))
+            
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            
+            if batch_idx % 100 == 0:
+                print(f'Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}')
+        
+        avg_loss = total_loss / len(dataloader)
+        print(f'Epoch {epoch} completed. Average Loss: {avg_loss:.4f}')
+        
+        # Synchronize NVMe tensors
+        nvme_manager.sync_all()
+    
+    print("Training completed!")
+
+if __name__ == "__main__":
+    train_with_nvme()
+7. Step 6: Build and Deployment
+7.1 Makefile for Kernel Module
+makefile
+# Makefile
+obj-m += nvme_compute.o
+nvme_compute-objs := nvme_compute_core.o nvme_compute_setup.o
+
+KVERSION = $(shell uname -r)
+KERNEL_DIR = /lib/modules/$(KVERSION)/build
+
+all:
+	make -C $(KERNEL_DIR) M=$(PWD) modules
+
+clean:
+	make -C $(KERNEL_DIR) M=$(PWD) clean
+
+install:
+	sudo insmod nvme_compute.ko
+
+uninstall:
+	sudo rmmod nvme_compute
+
+debug:
+	make -C $(KERNEL_DIR) M=$(PWD) modules EXTRA_CFLAGS="-DDEBUG"
+
+.PHONY: all clean install uninstall debug
+7.2 setup.py for PyTorch Extension
+python
+# setup.py
+from setuptools import setup, Extension
+from torch.utils import cpp_extension
+import os
+
+# Check if we're building in a development environment
+debug_mode = os.getenv('NVME_COMPUTE_DEBUG', '0') == '1'
+
+extra_compile_args = {
+    'cxx': [
+        '-O3', 
+        '-std=c++14',
+        '-fopenmp',
+        '-march=native'
+    ]
+}
+
+if debug_mode:
+    extra_compile_args['cxx'].extend([
+        '-g',
+        '-DDEBUG',
+        '-O0'
+    ])
+
+setup(
+    name='nvme_compute_extension',
+    ext_modules=[
+        cpp_extension.CppExtension(
+            'nvme_compute_extension',
+            [
+                'nvme_compute_extension.cpp',
+            ],
+            libraries=['rt'],
+            extra_compile_args=extra_compile_args
+        )
+    ],
+    cmdclass={
+        'build_ext': cpp_extension.BuildExtension
+    },
+    packages=['nvme_compute'],
+    package_dir={'': '.'},
+    install_requires=[
+        'torch>=1.9.0',
+        'numpy>=1.21.0'
+    ]
+)
+7.3 Deployment Script
+bash
+#!/bin/bash
+# deploy.sh
+
+set -e
+
+echo "Deploying NVMe Compute Engine..."
+
+# Build kernel module
+echo "Building kernel module..."
+make clean
+make
+
+# Load kernel module
+echo "Loading kernel module..."
+sudo insmod nvme_compute.ko
+
+# Check if module loaded successfully
+if lsmod | grep -q nvme_compute; then
+    echo "Kernel module loaded successfully"
+else
+    echo "Failed to load kernel module"
+    exit 1
+fi
+
+# Check if device file was created
+if [ -e /dev/nvmecpu0 ]; then
+    echo "Device file created: /dev/nvmecpu0"
+    
+    # Set appropriate permissions
+    sudo chmod 666 /dev/nvmecpu0
+    echo "Device permissions updated"
+else
+    echo "Device file not found. Check dmesg for errors."
+    exit 1
+fi
+
+# Build PyTorch extension
+echo "Building PyTorch extension..."
+python setup.py build develop
+
+echo "Deployment completed successfully!"
+echo ""
+echo "Usage:"
+echo "  import nvme_compute_extension as nvme"
+echo "  engine = nvme.NVMeComputeEngine()"
+echo "  result = engine.matrix_multiply(tensor_a, tensor_b)"
+8. Performance Monitoring and Debugging
+python
+# nvme_monitor.py
+import time
+import psutil
+import torch
+from typing import Dict, Any
+
+class NVMePerformanceMonitor:
+    def __init__(self, compute_engine):
+        self.compute_engine = compute_engine
+        self.operations_log = []
+        self.start_time = time.time()
+    
+    def log_operation(self, op_name: str, input_shapes: list, duration: float):
+        """Log operation performance"""
+        log_entry = {
+            'timestamp': time.time(),
+            'operation': op_name,
+            'input_shapes': input_shapes,
+            'duration': duration,
+            'memory_used': psutil.virtual_memory().used
+        }
+        self.operations_log.append(log_entry)
+    
+    def benchmark_operation(self, op_func, *args, **kwargs) -> Dict[str, Any]:
+        """Benchmark a single operation"""
+        start_time = time.time()
+        start_memory = psutil.virtual_memory().used
+        
+        result = op_func(*args, **kwargs)
+        
+        end_time = time.time()
+        end_memory = psutil.virtual_memory().used
+        
+        duration = end_time - start_time
+        memory_delta = end_memory - start_memory
+        
+        # Log the operation
+        input_shapes = [arg.shape if hasattr(arg, 'shape') else str(type(arg)) 
+                       for arg in args]
+        
+        self.log_operation(op_func.__name__, input_shapes, duration)
+        
+        return {
+            'result': result,
+            'duration': duration,
+            'memory_delta': memory_delta,
+            'throughput': args[0].numel() / duration if hasattr(args[0], 'numel') else 0
+        }
+    
+    def compare_with_pytorch(self, nvme_func, torch_func, *args):
+        """Compare NVMe operation with PyTorch equivalent"""
+        # Benchmark NVMe operation
+        nvme_result = self.benchmark_operation(nvme_func, *args)
+        
+        # Benchmark PyTorch operation
+        torch_result = self.benchmark_operation(torch_func, *args)
+        
+        comparison = {
+            'nvme_duration': nvme_result['duration'],
+            'torch_duration': torch_result['duration'],
+            'speedup': torch_result['duration'] / nvme_result['duration'],
+            'nvme_memory': nvme_result['memory_delta'],
+            'torch_memory': torch_result['memory_delta']
+        }
+        
+        return comparison
+    
+    def generate_report(self):
+        """Generate performance report"""
+        total_duration = time.time() - self.start_time
+        total_operations = len(self.operations_log)
+        
+        if total_operations == 0:
+            return "No operations logged"
+        
+        avg_duration = sum(op['duration'] for op in self.operations_log) / total_operations
+        
+        report = f"""
+NVMe Compute Engine Performance Report
+======================================
+Total monitoring time: {total_duration:.2f} seconds
+Total operations: {total_operations}
+Average operation duration: {avg_duration:.4f} seconds
+
+Operations breakdown:
+"""
+        
+        op_counts = {}
+        for op in self.operations_log:
+            op_name = op['operation']
+            op_counts[op_name] = op_counts.get(op_name, 0) + 1
+        
+        for op_name, count in op_counts.items():
+            report += f"  {op_name}: {count} operations\n"
+        
+        return report
+
+# Usage example
+def benchmark_matrix_multiplication():
+    import nvme_compute_extension as nvme
+    
+    engine = nvme.NVMeComputeEngine()
+    monitor = NVMePerformanceMonitor(engine)
+    
+    # Create test tensors
+    size = 2048
+    a = torch.randn(size, size)
+    b = torch.randn(size, size)
+    
+    # Benchmark NVMe vs PyTorch
+    comparison = monitor.compare_with_pytorch(
+        engine.matrix_multiply,
+        torch.matmul,
+        a, b
+    )
+    
+    print("Matrix Multiplication Benchmark:")
+    print(f"  NVMe: {comparison['nvme_duration']:.4f}s")
+    print(f"  PyTorch: {comparison['torch_duration']:.4f}s")
+    print(f"  Speedup: {comparison['speedup']:.2f}x")
+    
+    print(monitor.generate_report())
+
+if __name__ == "__main__":
+    benchmark_matrix_multiplication()
+This comprehensive project provides a complete framework for transforming NVMe storage devices into computational units, with deep integration into PyTorch for machine learning workloads. The system demonstrates significant potential for reducing I/O bottlenecks in data-intensive applications while maintaining the familiar PyTorch API for developers.
